@@ -13,6 +13,8 @@ venv/
 
 # uv
 uv.lock
+# The standalone Telegram image and CI use a frozen dependency environment.
+!services/telegram/uv.lock
 
 # Testing
 .pytest_cache/
