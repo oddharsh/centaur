@@ -68,7 +68,7 @@ jobs:
           import json
           import os
 
-          available = ["api-rs", "company-context", "proxy-sync", "token-broker", "slackbotv2", "linearbot", "discordbot", "githubbot", "teamsbot", "agent", "iron-proxy", "console"]
+          available = ["api-rs", "company-context", "proxy-sync", "token-broker", "slackbotv2", "linearbot", "discordbot", "githubbot", "teamsbot", "agent", "iron-proxy", "console", "telegram"]
           requested = os.environ["REQUESTED_SERVICES"].strip()
           services = available if requested == "all" else [item.strip() for item in requested.split(",")]
           if not services or any(service not in available for service in services) or len(set(services)) != len(services):
@@ -150,7 +150,7 @@ jobs:
         uses: depot/build-push-action@0f27be7c41d76663a98518dfe68f1c46582242c4 # v1.19.0
         with:
           project: d8qqlh1bmq
-          context: .
+          context: ${{ matrix.service == 'telegram' && 'services/telegram' || '.' }}
           file: ${{ matrix.service == 'agent' && 'services/sandbox/Dockerfile' || format('services/{0}/Dockerfile', matrix.service) }}
           target: ${{ matrix.service == 'agent' && 'sandbox' || '' }}
           platforms: ${{ matrix.platform }}
@@ -167,7 +167,7 @@ jobs:
         id: buildx-build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
-          context: .
+          context: ${{ matrix.service == 'telegram' && 'services/telegram' || '.' }}
           file: ${{ matrix.service == 'agent' && 'services/sandbox/Dockerfile' || format('services/{0}/Dockerfile', matrix.service) }}
           target: ${{ matrix.service == 'agent' && 'sandbox' || '' }}
           platforms: ${{ matrix.platform }}
