@@ -1,0 +1,28 @@
+<% content_for :title, "Personal Telegram · Centaur Console" %>
+<%= render "console/page_header", title: "Personal Telegram", subtitle: "Available only in your own Slack DM with the agent." %>
+<div class="console-panel max-w-xl space-y-4 p-5">
+  <p>Connect your Telegram account to find conversations and read or search messages for your private briefs. Telegram content stays out of shared Slack search. Disconnecting removes the agent's access.</p>
+  <% case @connection["phase"] %>
+  <% when "connected" %>
+    <p>Connected. You can ask for Telegram context in your Slack DM.</p>
+  <% when "waiting" %>
+    <p>In Telegram, open Settings → Devices → Link Desktop Device and scan this code. Keep this page private.</p>
+    <% if @connection["qr_image"].to_s.match?(/\Adata:image\/png;base64,[A-Za-z0-9+\/=]+\z/) %>
+      <%= image_tag @connection["qr_image"], alt: "Telegram sign-in QR code", width: 280, height: 280 %>
+    <% end %>
+    <%= link_to "Check connection", console_telegram_path, class: "btn-secondary" %>
+  <% when "password_needed" %>
+    <%= form_with url: console_telegram_path, method: :patch do |form| %>
+      <%= form.label :password, "Telegram two-step verification password" %>
+      <%= form.password_field :password, required: true, autocomplete: "current-password", maxlength: 1024 %>
+      <%= form.submit "Finish connecting", class: "btn-primary" %>
+    <% end %>
+  <% when "expired" %>
+    <p>Sign-in expired. Disconnect below, then start again.</p>
+  <% else %>
+    <%= button_to "Connect Telegram", console_telegram_path, method: :post, class: "btn-primary" %>
+  <% end %>
+  <% unless @connection["phase"] == "disconnected" %>
+    <%= button_to "Disconnect Telegram", console_telegram_path, method: :delete, class: "btn-secondary" %>
+  <% end %>
+</div>
