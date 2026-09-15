@@ -4,7 +4,15 @@
            title: "Integrations",
            subtitle: "Connect your accounts so Centaur can act on your behalf." %>
 
-<% if @oauth_apps.empty? %>
+<% if TelegramGateway.configured? %>
+  <div class="console-panel mb-4 max-w-xl p-5">
+    <h2>Personal Telegram</h2>
+    <p>Find conversations and read messages only in your own Slack DM.</p>
+    <%= link_to "Manage Telegram connection", console_telegram_path, class: "btn-secondary" %>
+  </div>
+<% end %>
+
+<% if @oauth_apps.empty? && !TelegramGateway.configured? %>
   <p class="empty-state">No integrations available yet.</p>
 <% else %>
   <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">

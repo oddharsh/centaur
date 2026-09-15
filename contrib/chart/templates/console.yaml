@@ -100,6 +100,15 @@ spec:
           image: {{ printf "%s:%s" $console.image.repository $console.image.tag | quote }}
           imagePullPolicy: {{ $console.image.pullPolicy }}
           env:
+{{- if .Values.telegram.enabled }}
+            - name: CENTAUR_CONSOLE_TELEGRAM_SERVICE_URL
+              value: {{ printf "http://%s:8000" (include "centaur.componentName" (dict "root" . "component" "telegram")) | quote }}
+            - name: CENTAUR_CONSOLE_TELEGRAM_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "telegram.existingSecretName is required" .Values.telegram.existingSecretName }}
+                  key: TELEGRAM_SERVICE_TOKEN
+{{- end }}
             # Explicit secretKeyRefs only — never envFrom the shared Secret, or
             # its DATABASE_URL (ai_v2) would leak into console's env. Env
             # var names match the IRON_CONTROL_* secret keys 1:1 (except
@@ -376,6 +385,15 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.apiRs.port }}
+{{- end }}
+{{- if .Values.telegram.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "telegram") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8000
 {{- end }}
     # Outbound HTTPS (external DB DSNs, IdPs, etc.).
     - ports:
