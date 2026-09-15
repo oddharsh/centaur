@@ -129,6 +129,9 @@ Rails.application.routes.draw do
   # User-facing list of enabled OAuth apps and their consent start links. Not
   # admin-gated: any signed-in team member connects integrations from here.
   get "console/integrations", to: "console/integrations#index", as: :console_integrations
+  namespace :console do
+    resource :telegram, only: %i[show create update destroy], controller: :telegram
+  end
   get "console/etls", to: "console/etls#index", as: :console_etls
   namespace :console do
     post "etls/slack_archive_imports",
@@ -272,6 +275,7 @@ Rails.application.routes.draw do
       # Called from inside sandboxes through their assigned iron-proxy. The
       # proxy injects a short-lived sandbox entitlement JWT scoped to these paths.
       namespace :sandbox do
+        post "telegram/mcp", to: "telegram#create"
         resource :permissions, only: :show
         resources :oauth_apps, only: :index
         resources :scheduled_tasks, only: %i[index show create update destroy] do

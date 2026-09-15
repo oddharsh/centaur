@@ -30,7 +30,7 @@ build:
       just _build-all-sequential
     else
       pids=()
-      for recipe in _build-api-rs _build-proxy-sync _build-iron-proxy _build-slackbotv2 _build-linearbot _build-discordbot _build-githubbot _build-teamsbot _build-agent _build-console; do
+      for recipe in _build-api-rs _build-proxy-sync _build-iron-proxy _build-slackbotv2 _build-linearbot _build-discordbot _build-githubbot _build-teamsbot _build-agent _build-console _build-telegram; do
         just "$recipe" &
         pids+=("$!")
       done
@@ -52,6 +52,7 @@ _build-all-sequential:
     just _build-teamsbot
     just _build-agent
     just _build-console
+    just _build-telegram
 
 build-one service:
     #!/usr/bin/env bash
@@ -68,6 +69,7 @@ build-one service:
       agent|sandbox) just _build-agent ;;
       workflow-python) just _build-workflow-python ;;
       console) just _build-console ;;
+      telegram) just _build-telegram ;;
       *) echo "unknown service: {{service}}" >&2; exit 2 ;;
     esac
 
@@ -108,13 +110,16 @@ _build-workflow-python:
 _build-console:
     docker build -t centaur-console:latest -f services/console/Dockerfile services/console
 
+_build-telegram:
+    docker build -t centaur-telegram:latest -f services/telegram/Dockerfile services/telegram
+
 # Push locally-built images to the local registry under library/ so k3s pulls
 # them via its docker.io mirror. Used by `just up k3s`. Only changed layers are
 # pushed, so this is much faster than `_import-k3s` on repeat runs.
 _push-registry:
     #!/usr/bin/env bash
     set -euo pipefail
-    for img in centaur-api-rs centaur-proxy-sync centaur-iron-proxy centaur-slackbotv2 centaur-linearbot centaur-discordbot centaur-githubbot centaur-teamsbot centaur-agent centaur-console; do
+    for img in centaur-api-rs centaur-proxy-sync centaur-iron-proxy centaur-slackbotv2 centaur-linearbot centaur-discordbot centaur-githubbot centaur-teamsbot centaur-agent centaur-console centaur-telegram; do
       target="{{registry}}/library/${img}:latest"
       echo "pushing ${img}:latest -> ${target}..."
       docker tag "${img}:latest" "${target}"
@@ -127,7 +132,7 @@ _push-registry:
 _import-k3s:
     #!/usr/bin/env bash
     set -euo pipefail
-    for img in centaur-api-rs centaur-proxy-sync centaur-iron-proxy centaur-slackbotv2 centaur-linearbot centaur-discordbot centaur-githubbot centaur-teamsbot centaur-agent centaur-console; do
+    for img in centaur-api-rs centaur-proxy-sync centaur-iron-proxy centaur-slackbotv2 centaur-linearbot centaur-discordbot centaur-githubbot centaur-teamsbot centaur-agent centaur-console centaur-telegram; do
       echo "importing ${img}:latest into k3s containerd..."
       docker save "${img}:latest" | {{k3s_ctr}} images import -
     done
@@ -154,6 +159,7 @@ deploy:
           --set teamsbot.image.repository=ghcr.io/paradigmxyz/centaur/centaur-teamsbot
           --set sandbox.image.repository=ghcr.io/paradigmxyz/centaur/centaur-agent
           --set console.image.repository=ghcr.io/paradigmxyz/centaur/centaur-console
+          --set telegram.image.repository=ghcr.io/paradigmxyz/centaur/centaur-telegram
         )
         ;;
       *) echo "unknown source: {{source}} (expected local or ghcr)" >&2; exit 2 ;;
