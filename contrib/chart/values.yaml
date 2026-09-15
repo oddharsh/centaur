@@ -4,6 +4,28 @@ fullnameOverride: ""
 global:
   imagePullSecrets: []
 
+# Personal Telegram state lives only in this service. Console authenticates the
+# browser and requires the caller's own Slack DM for every MCP request.
+telegram:
+  enabled: false
+  image:
+    repository: centaur-telegram
+    tag: ""
+    pullPolicy: IfNotPresent
+  # Contains TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION_KEY (Fernet),
+  # and TELEGRAM_SERVICE_TOKEN (at least 32 random characters).
+  existingSecretName: ""
+  storage:
+    size: 1Gi
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
 secretManager:
   envPrefix: ""
   existingSecretName: centaur-infra-env

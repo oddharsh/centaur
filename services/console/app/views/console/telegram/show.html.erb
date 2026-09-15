@@ -1,0 +1,41 @@
+<% content_for :title, "Personal Telegram · Centaur Console" %>
+
+<div class="oauth-header">
+  <img src="<%= OauthPageAssets.path("centaur-lockup-white.svg") %>" alt="Centaur" class="oauth-logo" width="497" height="127">
+  <p class="oauth-subtitle">Personal Telegram. Available only in your own Slack DM with the agent.</p>
+</div>
+
+<% if flash[:notice] %>
+  <div class="oauth-notice" role="status"><%= flash[:notice] %></div>
+<% end %>
+<% if flash[:alert] %>
+  <div class="oauth-notice" role="alert"><%= flash[:alert] %></div>
+<% end %>
+
+<section class="oauth-card" aria-labelledby="telegram-heading">
+  <h1 id="telegram-heading" class="oauth-result-heading">Personal Telegram</h1>
+  <p class="oauth-result-message">Connect your Telegram account to find conversations and read or search messages for your private briefs. Telegram content stays out of shared Slack search. Disconnecting removes the agent's access.</p>
+  <% case @connection["phase"] %>
+  <% when "connected" %>
+    <p class="oauth-result-message">Connected. You can ask for Telegram context in your Slack DM.</p>
+  <% when "waiting" %>
+    <p class="oauth-result-message">In Telegram, open Settings → Devices → Link Desktop Device and scan this code. Keep this page private.</p>
+    <% if @connection["qr_image"].to_s.match?(/\Adata:image\/png;base64,[A-Za-z0-9+\/=]+\z/) %>
+      <%= image_tag @connection["qr_image"], alt: "Telegram sign-in QR code", width: 280, height: 280 %>
+    <% end %>
+    <%= link_to "Check connection", console_telegram_path, class: "oauth-button oauth-button-outline" %>
+  <% when "password_needed" %>
+    <%= form_with url: console_telegram_path, method: :patch do |form| %>
+      <%= form.label :password, "Telegram two-step verification password" %>
+      <%= form.password_field :password, required: true, autocomplete: "current-password", maxlength: 1024 %>
+      <%= form.submit "Finish connecting", class: "oauth-button oauth-button-primary" %>
+    <% end %>
+  <% when "expired" %>
+    <p class="oauth-result-message">Sign-in expired. Disconnect below, then start again.</p>
+  <% else %>
+    <%= button_to "Connect Telegram", console_telegram_path, method: :post, class: "oauth-button oauth-button-primary", form_class: "oauth-button-form" %>
+  <% end %>
+  <% unless @connection["phase"] == "disconnected" %>
+    <%= button_to "Disconnect Telegram", console_telegram_path, method: :delete, class: "oauth-button oauth-button-outline", form_class: "oauth-button-form" %>
+  <% end %>
+</section>

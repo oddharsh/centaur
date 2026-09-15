@@ -109,6 +109,7 @@ namespace :api do
     # Called from inside sandboxes through their assigned iron-proxy. The
     # proxy injects a short-lived sandbox entitlement JWT scoped to these paths.
     namespace :sandbox do
+      post "telegram/mcp", to: "telegram#create"
       resource :permissions, only: :show
       resources :oauth_apps, only: :index
       resources :scheduled_tasks, only: %i[index show create update destroy] do
