@@ -1604,7 +1604,8 @@ fn should_retry_iron_control_register(error: &RegisterError) -> bool {
     match error {
         RegisterError::Translate(_) => false,
         RegisterError::Control(IronControlError::PrincipalDerivation(_))
-        | RegisterError::Control(IronControlError::SessionPrincipalNotPreapproved { .. }) => false,
+        | RegisterError::Control(IronControlError::SessionPrincipalNotPreapproved { .. })
+        | RegisterError::Control(IronControlError::SlackSearchEnrollmentRequired) => false,
         RegisterError::Control(IronControlError::Transport { .. }) => true,
         RegisterError::Control(IronControlError::Decode { .. })
         | RegisterError::Control(IronControlError::NotFound { .. }) => false,
