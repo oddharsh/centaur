@@ -21,7 +21,7 @@ jobs:
   release:
     permissions:
       contents: write
-    runs-on: depot-ubuntu-24.04
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -35,7 +35,7 @@ jobs:
           git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
 
       - name: Bootstrap gh-pages branch
-        if: github.event_name == 'push'
+        if: github.repository == 'paradigmxyz/centaur' && github.event_name == 'push'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -81,7 +81,7 @@ jobs:
           fi
 
       - name: Run chart-releaser
-        if: steps.version.outputs.unreleased == 'true'
+        if: github.repository == 'paradigmxyz/centaur' && steps.version.outputs.unreleased == 'true'
         uses: helm/chart-releaser-action@92c6b97fa9f664492a2592e0d1d80bc6bf378957 # v1.9.0
         with:
           skip_existing: true
