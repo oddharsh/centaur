@@ -26,7 +26,7 @@ permissions:
 jobs:
   build-and-deploy:
     name: Build and deploy docs
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04-16' || 'ubuntu-24.04' }}
     timeout-minutes: 20
     strategy:
       matrix:
@@ -62,7 +62,7 @@ jobs:
         run: npm run build
 
       - name: Deploy
-        if: ${{ github.event_name != 'pull_request' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_API_TOKEN != '' }}
+        if: ${{ github.repository == 'paradigmxyz/centaur' && github.event_name != 'pull_request' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_API_TOKEN != '' }}
         uses: cloudflare/wrangler-action@4e88846969242f7752bcfdaf5511bfbb3985ca47 # v4.1.1
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -72,7 +72,7 @@ jobs:
 
       - name: Preview
         id: preview
-        if: ${{ github.event_name == 'pull_request' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_API_TOKEN != '' }}
+        if: ${{ github.repository == 'paradigmxyz/centaur' && github.event_name == 'pull_request' && env.CLOUDFLARE_ACCOUNT_ID != '' && env.CLOUDFLARE_API_TOKEN != '' }}
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
