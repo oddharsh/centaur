@@ -23,6 +23,10 @@ The ETL path is separate from Slackbot delivery. Slackbot handles live user
 turns in Slack threads; Slack ETL reads Slack history with a dedicated user
 token and writes durable rows into Postgres.
 
+[Temporary Slack search answers](/operate/slack-search) use a separate live
+retrieval path. Its channel-only restrictions do not change this index's
+permissions or the user-scoped ingestion described below.
+
 ## What it runs
 
 | Workflow | Default cadence | Role |
