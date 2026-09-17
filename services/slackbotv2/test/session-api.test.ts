@@ -12,6 +12,7 @@ import {
   serializeMessage
 } from '../src/session-api'
 import { renderSlackDisplayText } from '../src/slack-display-text'
+import { captureSlackSearchCredential, requestContext } from '../src/request-context'
 import type {
   ForwardSessionInput,
   JsonObject,
@@ -146,6 +147,97 @@ function textPartIncludes(part: JsonObject, text: string): boolean {
 function isJsonRecord(value: JsonValue | undefined): value is JsonObject {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
+
+describe('Slack search context handoff', () => {
+  test('does not replay old messages or restart history into an enrolled execution', async () => {
+    const api = fakeApi({
+      createSession: [{ body: { ok: true, harness_switched: true }, status: 200 }]
+    })
+    const message = apiMessage('current request')
+    const old = apiMessage('synthetic-pre-enrollment-canary', { id: '1700000000.000001' })
+    let replayed = false
+    await forwardToSessionApi(
+      { ...options(api.fetchFn), slackSearchEnabled: true },
+      forwardInput(message, {
+        messages: [old, message], executeContextMessages: [old, message],
+        contextPreamble: 'synthetic-pre-enrollment-canary'
+      }),
+      { onSessionRestarted: async () => { replayed = true } }
+    )
+    expect(replayed).toBe(false)
+    expect(JSON.stringify(api.requests)).not.toContain('synthetic-pre-enrollment-canary')
+    expect(appendedTextParts(api.requests)).toContain('current request')
+    expect(JSON.stringify(executeBody(api.requests))).toContain('current request')
+  })
+
+  test('does not recover credentials from stored raw messages or another turn', async () => {
+    const api = fakeApi()
+    const canary = 'synthetic-stored-action-token'
+    const message = apiMessage('search Slack', { raw: { action_token: canary } })
+    await forwardToSessionApi({ ...options(api.fetchFn), slackSearchEnabled: true }, forwardInput(message))
+    expect(api.requests.some(request => request.url.endsWith('/api/slack/search-context'))).toBe(false)
+    expect(executeBody(api.requests).metadata).not.toHaveProperty('slack_search_context_id')
+    expect(JSON.stringify(executeBody(api.requests))).toContain('Slack search is unavailable for this turn')
+    expect(JSON.stringify(executeBody(api.requests))).toContain('Do not fall back to legacy Slack search')
+    expect(JSON.stringify(api.requests)).not.toContain(canary)
+
+    api.requests.length = 0
+    await requestContext.run({ waitUntil: () => undefined }, async () => {
+      captureSlackSearchCredential({
+        type: 'event_callback', team_id: 'T1', action_token: canary,
+        event: { type: 'app_mention', channel: 'C1', user: 'U1', ts: '1700000000.000999' }
+      })
+      await forwardToSessionApi({ ...options(api.fetchFn), slackSearchEnabled: true }, forwardInput(message))
+    })
+    expect(api.requests.some(request => request.url.endsWith('/api/slack/search-context'))).toBe(false)
+  })
+
+  for (const failure of ['status', 'json', 'context_id', 'exception', 'timeout'] as const) {
+    test(`preserves normal execution with a safe unavailable notice on registration ${failure}`, async () => {
+      const api = fakeApi()
+      const logs: unknown[] = []
+      const canary = 'synthetic-registration-token-canary'
+      const message = apiMessage('search Slack')
+      let registrations = 0
+      let registrationSignal: AbortSignal | null | undefined
+      const fetchFn: NonNullable<SlackbotV2Options['fetch']> = async (input, init) => {
+        if (!String(input).endsWith('/api/slack/search-context')) return api.fetchFn(input, init)
+        registrations++
+        registrationSignal = init?.signal
+        expect(new Headers(init?.headers).get('x-slack-action-token')).toBe(canary)
+        expect(String(init?.body)).not.toContain(canary)
+        if (failure === 'status') return new Response(canary, { status: 503 })
+        if (failure === 'json') return new Response(`{"${canary}":`)
+        if (failure === 'context_id') return Response.json({ ok: true, context_id: canary })
+        if (failure === 'exception') throw new Error(canary)
+        return new Promise(() => {})
+      }
+      const logger = {
+        debug: (...args: unknown[]) => { logs.push(args) },
+        info: (...args: unknown[]) => { logs.push(args) },
+        warn: (...args: unknown[]) => { logs.push(args) },
+        error: (...args: unknown[]) => { logs.push(args) },
+        child() { return this }
+      }
+      await requestContext.run({ waitUntil: () => undefined }, async () => {
+        captureSlackSearchCredential({
+          type: 'event_callback', team_id: 'T1', action_token: canary,
+          event: { type: 'app_mention', channel: 'C1', user: 'U1', ts: message.id }
+        })
+        await forwardToSessionApi({
+          ...options(fetchFn), slackSearchEnabled: true, slackApiTimeoutMs: 10, logger
+        }, forwardInput(message))
+      })
+      expect(registrations).toBe(1)
+      expect(registrationSignal?.aborted).toBe(true)
+      expect(api.requests.filter(request => request.url.endsWith('/execute'))).toHaveLength(1)
+      expect(JSON.stringify(executeBody(api.requests))).toContain('Slack search is unavailable for this turn')
+      expect(executeBody(api.requests).metadata).not.toHaveProperty('slack_search_context_id')
+      expect(JSON.stringify({ requests: api.requests, logs })).not.toContain(canary)
+      expect(logs).toContainEqual(['slackbotv2_slack_search_unavailable', { reason: 'registration_failed' }])
+    })
+  }
+})
 
 describe('Slack home team resolution', () => {
   test('resolves the home team ID from auth.test', async () => {

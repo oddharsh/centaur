@@ -188,7 +188,7 @@ impl AppState {
             .ok_or_else(|| ApiError::BadRequest("workflow runtime is not enabled".to_owned()))
     }
 
-    fn pool(&self) -> Result<PgPool, ApiError> {
+    pub(crate) fn pool(&self) -> Result<PgPool, ApiError> {
         let initialized = self
             .initialized()
             .ok_or_else(|| ApiError::ServiceUnavailable("api-rs is still starting".to_owned()))?;
@@ -260,6 +260,7 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         .route("/api/session/{thread_key}/events", get(stream_events))
         .route("/api/sandboxes/drain", post(drain_sandboxes))
         .merge(slack_proxy_router())
+        .merge(crate::slack_search_context::router())
         .route("/api/workflows/schedules", get(list_workflow_schedules))
         .route(
             "/api/workflows/runs",
@@ -449,6 +450,7 @@ enum RouteAccess {
     Capability(Capability),
     PrincipalOnly,
     ArchiveDownload,
+    SlackIngress,
 }
 
 async fn authorize_api_request(
@@ -483,6 +485,9 @@ async fn authorize_api_request(
     };
 
     let allowed = match access {
+        RouteAccess::SlackIngress => {
+            caller.class() == CallerClass::Ingress && caller.identity() == "slackbot"
+        }
         RouteAccess::Capability(capability) => caller.has_capability(capability),
         RouteAccess::PrincipalOnly => caller.class() == CallerClass::Principal,
         RouteAccess::ArchiveDownload => {
@@ -562,6 +567,7 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
         (&Method::POST, "/api/admin/slack/archive-imports/{import_id}/download-url") => {
             Some(RouteAccess::ArchiveDownload)
         }
+        (&Method::POST, "/api/slack/search-context") => Some(RouteAccess::SlackIngress),
         (_, route) if route.starts_with("/api/slack/") => Some(RouteAccess::PrincipalOnly),
         (_, route) if route.starts_with("/api/admin/slack/archive-imports") => {
             capability(Capability::AdminArchive)
@@ -774,7 +780,7 @@ async fn execute_session(
     Json(request): Json<ExecuteSessionRequest>,
 ) -> Result<Json<ExecuteSessionResponse>, ApiError> {
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
-    let metadata = sanitize_execute_metadata(caller.class(), request.metadata);
+    let metadata = sanitize_execute_metadata(caller.class(), caller.identity(), request.metadata);
     let execution = state
         .runtime()?
         .enqueue_session_execution(
@@ -802,12 +808,20 @@ async fn execute_session(
 /// the runtime can safely honor Console requesters on any thread namespace.
 fn sanitize_execute_metadata(
     caller_class: CallerClass,
+    caller_identity: &str,
     mut metadata: Option<Value>,
 ) -> Option<Value> {
     if caller_class != CallerClass::Console
         && let Some(Value::Object(fields)) = metadata.as_mut()
     {
         fields.remove("requester_principal_foreign_id");
+    }
+    // A search context asserts identity from a signed Slack event. Other
+    // ingress integrations and ordinary callers cannot attach this capability.
+    if !(caller_class == CallerClass::Ingress && caller_identity == "slackbot")
+        && let Some(Value::Object(fields)) = metadata.as_mut()
+    {
+        fields.remove("slack_search_context_id");
     }
     metadata
 }
@@ -969,7 +983,7 @@ mod session_authorization_tests {
         });
 
         assert_eq!(
-            sanitize_execute_metadata(CallerClass::Console, Some(metadata.clone())),
+            sanitize_execute_metadata(CallerClass::Console, "console", Some(metadata.clone())),
             Some(metadata.clone())
         );
         for caller_class in [
@@ -978,10 +992,30 @@ mod session_authorization_tests {
             CallerClass::Principal,
         ] {
             assert_eq!(
-                sanitize_execute_metadata(caller_class, Some(metadata.clone())),
+                sanitize_execute_metadata(caller_class, "test", Some(metadata.clone())),
                 Some(json!({ "source": "console" }))
             );
         }
+    }
+
+    #[test]
+    fn only_the_slack_ingress_may_bind_a_search_context() {
+        let metadata = json!({"slack_search_context_id": "context", "message_id": "1.2"});
+        for (class, identity) in [
+            (CallerClass::Console, "console"),
+            (CallerClass::Admin, "admin"),
+            (CallerClass::Principal, "slackbot"),
+            (CallerClass::Ingress, "discordbot"),
+        ] {
+            assert_eq!(
+                sanitize_execute_metadata(class, identity, Some(metadata.clone())),
+                Some(json!({"message_id": "1.2"}))
+            );
+        }
+        assert_eq!(
+            sanitize_execute_metadata(CallerClass::Ingress, "slackbot", Some(metadata.clone())),
+            Some(metadata)
+        );
     }
 }
 

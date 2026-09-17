@@ -1,5 +1,13 @@
 //! SQLx-backed session repository.
 
+mod slack_search_context;
+mod slack_search_epoch;
+pub use slack_search_context::{
+    ClaimedSlackSearchContext, PgSlackSearchContexts, RegisterSlackSearchContext,
+    SlackSearchContextError,
+};
+pub use slack_search_epoch::SlackSearchSessionLock;
+
 use std::{collections::BTreeMap, str::FromStr, time::Duration};
 
 use centaur_session_core::{
