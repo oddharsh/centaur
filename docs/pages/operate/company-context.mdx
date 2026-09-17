@@ -10,6 +10,10 @@ Docs, Calendar events, and Granola notes so agents can search it. A default
 install ingests nothing: both the company-context service and the legacy v1
 sync jobs are off until Helm values enable them.
 
+[Temporary Slack search answers](/operate/slack-search) use a separate live
+retrieval path. Its channel-only restrictions do not change this index's
+permissions or the user-scoped ingestion described below.
+
 | Values key | Default | What it runs |
 |------------|---------|--------------|
 | `companyContext.enabled` | `false` | The standalone `company-context` service. Recommended for new deployments. |

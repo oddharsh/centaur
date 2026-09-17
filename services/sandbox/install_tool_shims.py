@@ -144,6 +144,7 @@ def _copy_published_tools(tool_dir: Path, published: Path) -> None:
     if not published.is_dir():
         raise RuntimeError(f"refreshed tools subdir does not exist: {published}")
 
+    published = published.resolve()
     allowlist = _tool_allowlist()
     blocklist = _tool_blocklist()
     existing = {package_dir.name: package_dir for package_dir in _tool_package_dirs(tool_dir)}
@@ -161,7 +162,11 @@ def _copy_published_tools(tool_dir: Path, published: Path) -> None:
                 file=sys.stderr,
             )
             continue
-        relative_package_dir = package_dir.relative_to(published)
+        relative_package_dir = (
+            Path(package_dir.name)
+            if package_dir == published
+            else package_dir.relative_to(published)
+        )
         target = tool_dir / relative_package_dir
         if target.exists() or target.is_symlink():
             _remove_path(target)
@@ -173,6 +178,9 @@ def _copy_published_tools(tool_dir: Path, published: Path) -> None:
 def _tool_package_dirs(published: Path) -> list[Path]:
     if not published.is_dir():
         return []
+
+    if (published / "pyproject.toml").is_file():
+        return [published]
 
     package_dirs: list[Path] = []
     for child in _visible_dirs(published):
