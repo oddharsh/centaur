@@ -166,6 +166,33 @@ def search(
         console.print(table)
 
 
+@app.command("search-answer")
+def search_answer_command(
+    question: str = typer.Argument(..., help="Question to answer using authorized Slack channels"),
+    context: str = typer.Option(
+        ...,
+        "--context",
+        help="Invocation UUID supplied by Slackbot for this execution",
+    ),
+):
+    """Deliver a temporary, requester-only answer in Slack.
+
+    Prints only a delivery receipt. Retrieved messages, citations, and the
+    answer remain outside the agent's durable tool transcript.
+    """
+    from .client import search_answer
+
+    try:
+        search_answer(question, context_id=context)
+    except ValueError:
+        print(json.dumps({"ok": False, "error": "slack_search_invalid_request"}))
+        raise typer.Exit(1) from None
+    except Exception:
+        print(json.dumps({"ok": False, "error": "slack_search_answer_failed"}))
+        raise typer.Exit(1) from None
+    print(json.dumps({"ok": True, "status": "accepted", "delivery": "ephemeral"}))
+
+
 @app.command("channel-direct")
 def channel_direct(
     name: str = typer.Argument(..., help="Slack channel ID, e.g. C1234567890"),
