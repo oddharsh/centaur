@@ -45,7 +45,7 @@ jobs:
   # dispatch builds stay amd64-only to keep iteration fast. Fork PRs skip both
   # jobs so untrusted changes do not run on the hosted image builders.
   build:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
+    if: ${{ github.repository == 'paradigmxyz/centaur' && (github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork) }}
     runs-on: ${{ matrix.platform == 'linux/arm64' && 'depot-ubuntu-24.04-arm-16' || 'depot-ubuntu-24.04-16' }}
     strategy:
       fail-fast: false
@@ -167,7 +167,7 @@ jobs:
   merge:
     runs-on: depot-ubuntu-24.04-16
     needs: build
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
+    if: ${{ github.repository == 'paradigmxyz/centaur' && (github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork) }}
     strategy:
       fail-fast: false
       matrix:
@@ -235,7 +235,7 @@ jobs:
   notify-centaur-paradigm:
     name: Notify Paradigm Overlay
     needs: merge
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.repository == 'paradigmxyz/centaur' && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: centaur-paradigm-dispatch
     permissions: {}
