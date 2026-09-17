@@ -50,6 +50,55 @@ class CopyPublishedToolsTest(unittest.TestCase):
             self.assertFalse((target / "research" / "websearch" / "new.py").exists())
             self.assertEqual((target / "research" / "company" / "pyproject.toml").read_text(), "company\n")
 
+    def test_single_package_source_preserves_siblings_and_first_source_precedence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            selected = root / "fork" / "tools" / "productivity" / "slack"
+            upstream = root / "upstream" / "tools"
+            target = root / "target"
+            target.mkdir()
+            metadata = target / install_tool_shims.TOOLS_METADATA_NAME
+            metadata.write_text("retained source metadata")
+            for package, value in (
+                (selected, "selected-slack"),
+                (selected.parent / "calendar", "unselected-calendar"),
+                (upstream / "productivity" / "slack", "upstream-slack"),
+                (upstream / "productivity" / "calendar", "current-calendar"),
+            ):
+                package.mkdir(parents=True)
+                (package / "pyproject.toml").write_text(value)
+            with contextlib.redirect_stderr(io.StringIO()):
+                install_tool_shims._copy_published_tools(target, selected)
+                install_tool_shims._copy_published_tools(target, upstream)
+            self.assertEqual((target / "slack" / "pyproject.toml").read_text(), "selected-slack")
+            self.assertEqual(
+                (target / "productivity" / "calendar" / "pyproject.toml").read_text(),
+                "current-calendar",
+            )
+            self.assertFalse((target / "productivity" / "slack").exists())
+            self.assertEqual(metadata.read_text(), "retained source metadata")
+
+            # A preceding overlay package retains the same first-source behavior.
+            (target / "slack" / "pyproject.toml").write_text("overlay-slack")
+            with contextlib.redirect_stderr(io.StringIO()):
+                install_tool_shims._copy_published_tools(target, selected)
+            self.assertEqual((target / "slack" / "pyproject.toml").read_text(), "overlay-slack")
+
+    def test_single_package_source_respects_filters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            selected = root / "slack"
+            selected.mkdir()
+            (selected / "pyproject.toml").write_text("selected-slack")
+            for name, filters, included in (
+                ("allowed", {"TOOL_ALLOWLIST": "slack", "TOOL_BLOCKLIST": ""}, True),
+                ("not-allowed", {"TOOL_ALLOWLIST": "calendar", "TOOL_BLOCKLIST": ""}, False),
+                ("blocked", {"TOOL_ALLOWLIST": "", "TOOL_BLOCKLIST": "slack"}, False),
+            ):
+                with mock.patch.dict("os.environ", filters):
+                    install_tool_shims._copy_published_tools(root / name, selected)
+                self.assertEqual((root / name / "slack" / "pyproject.toml").exists(), included)
+
     def test_tool_allowlist_restricts_installed_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -444,6 +493,64 @@ class GeneratedShimTest(unittest.TestCase):
 
 
 class RefreshInstallTest(unittest.TestCase):
+    def test_repo_cache_single_package_refresh_rebuilds_runnable_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checkout = root / "repo"
+            package = checkout / "tools" / "productivity" / "slack"
+            target = root / "tools"
+            bin_dir = root / "bin"
+            package.mkdir(parents=True)
+            target.mkdir()
+            (package / "pyproject.toml").write_text(
+                '[project]\nname = "slack"\n[project.scripts]\nslack = "cli:main"\n'
+            )
+            (package / "__init__.py").write_text("")
+            (package / "client.py").write_text(
+                'class Client:\n    def version(self):\n        return "selected-v2"\n'
+                'def _client():\n    return Client()\n'
+            )
+            metadata = target / install_tool_shims.TOOLS_METADATA_NAME
+            metadata.write_text(json.dumps({"sources": [{
+                "source": "repo_cache",
+                "repo_cache_repo_path": str(checkout),
+                "source_subdir": "tools/productivity/slack",
+            }]}))
+            stale = target / "slack"
+            stale.mkdir()
+            (stale / "pyproject.toml").write_text("stale")
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            fake_uvx = fake_bin / "uvx"
+            fake_uvx.write_text(
+                f"#!{sys.executable}\n"
+                "import subprocess, sys\n"
+                "assert sys.argv[1] == '--from' and sys.argv[3] == 'python'\n"
+                "raise SystemExit(subprocess.call([sys.executable, *sys.argv[4:]]))\n"
+            )
+            fake_uvx.chmod(0o755)
+            with (
+                mock.patch.dict("os.environ", {"TOOL_ALLOWLIST": "", "TOOL_BLOCKLIST": ""}),
+                mock.patch.object(install_tool_shims, "_workspace_dir", return_value=root / "workspace"),
+                mock.patch.object(install_tool_shims, "_skill_sources", return_value=[]),
+            ):
+                install_tool_shims._install_tool_shims([target], bin_dir, refresh=True)
+            self.assertTrue(metadata.exists())
+            catalog = json.loads((bin_dir / ".centaur-tools.json").read_text())
+            self.assertEqual([item["name"] for item in catalog], ["slack"])
+            self.assertEqual(catalog[0]["project_dir"], str(target / "slack"))
+            result = subprocess.run(
+                [str(bin_dir / "centaur-tools"), "call", "slack", "version", "{}"],
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+                    "CENTAUR_TOOL_ANALYTICS_LOG_PATH": "off",
+                },
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), "selected-v2")
+
     def test_install_removes_stale_generated_shims(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

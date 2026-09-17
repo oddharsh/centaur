@@ -134,6 +134,8 @@ export type SlackbotV2Options = {
   apiUrl: string
   /** Enable Slack's Agent messaging experience. Must match the app manifest. */
   agentViewEnabled?: boolean
+  /** Register verified per-turn credentials for requester-only Slack search answers. */
+  slackSearchEnabled?: boolean
   assistantStatus?: string
   /**
    * When enabled, session.activity_summary events update Slack's assistant

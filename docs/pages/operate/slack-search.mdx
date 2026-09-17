@@ -1,0 +1,149 @@
+---
+title: Temporary Slack search answers
+description: Answer Slack questions with public Real-time Search and authorized private-channel history, without copying results into agent transcripts.
+---
+
+# Temporary Slack search answers
+
+Centaur can deliver a temporary answer visible only to the person who asked
+the question. Public-channel retrieval uses Slack's Real-time Search API,
+including channels the bot has not joined.
+
+Private-channel retrieval uses recent history from channels shared by the bot
+and the requester. Direct messages and group DMs are excluded as sources.
+Ordinary conversations with the bot in DMs continue to work.
+
+## Enable the feature
+
+The feature defaults off because the Slack app needs `search:read.public`
+before it can use public RTS. First complete the permission migration below
+for the enrolled principals and verify the boundary with synthetic canaries.
+Grant the bot scope and reinstall the app, then configure the API's synthesis
+model and enable Slackbot registration:
+
+```yaml
+slackbotv2:
+  slackSearchEnabled: true
+apiRs:
+  extraEnv:
+    SLACK_SEARCH_PROVIDER: "anthropic"
+    SLACK_SEARCH_MODEL: "claude-haiku-4-5-20251001"
+    SLACK_SEARCH_EPOCH: "<reviewed-enrollment-version>"
+```
+
+Choose `SLACK_SEARCH_PROVIDER` explicitly: `openai` (the default) uses
+`OPENAI_API_KEY`, `OPENAI_BASE_URL` (default `https://api.openai.com/v1`), and
+model `gpt-5.4-mini`; `anthropic` uses `ANTHROPIC_API_KEY`,
+`ANTHROPIC_BASE_URL` (default `https://api.anthropic.com`), and model
+`claude-haiku-4-5-20251001`. `SLACK_SEARCH_MODEL` overrides the chosen provider's
+default. Anthropic's base URL excludes `/v1`; the API appends `/v1/messages`.
+Credentials stay in the existing API server secret configuration. Missing
+credentials or provider failures do not fall back to another provider.
+
+Both providers receive one bounded request with the same JSON answer schema,
+no tools, and no conversation history. OpenAI requests set `store: false`;
+Anthropic requests use [structured outputs](https://platform.claude.com/docs/en/build-with-claude/structured-outputs)
+without prompt caching. The API validates the answer and citation IDs before
+requester-only delivery. This feature does not require a Slack user OAuth
+token or new sandbox credentials. Keep the bot token in the existing server
+secret configuration.
+
+Set the same enrollment version on each migrated principal's
+`centaur.slack_search_epoch` label. When the API epoch is configured, unknown
+or unenrolled Slack principals cannot start an agent execution. Enroll later
+principals through the same reviewed permission migration before use.
+
+The first use in a new epoch retires the previous sandbox and starts fresh
+harness state, while preserving stored session records. Slackbot does not
+backfill channel or DM history while search is enabled, including after a
+harness switch. The current event still reaches the agent; retrieved history
+stays inside the temporary-answer path.
+
+The bot also needs `groups:read` and `groups:history` for private-channel
+retrieval, and `chat:write` for temporary answer delivery. Existing Slack
+ingress scopes remain unchanged.
+
+The Helm value renders `SLACKBOTV2_SLACK_SEARCH_ENABLED`. The server obtains
+the RTS action token from a verified Slack event and binds the invocation to
+its principal, session, and active execution. The encrypted action token is
+stored in Postgres for up to ten minutes, so an unclaimed invocation survives
+API replicas and restarts. Claiming it erases the stored token. An expired or
+already claimed invocation, including an uncertain delivery, requires a fresh
+Slack request.
+
+## Agent command
+
+Slackbot supplies an invocation UUID for the current execution. The agent
+can use it once it needs Slack context:
+
+```bash
+slack search-answer "What changed in the launch plan?" --context <invocation-uuid>
+```
+
+The API retrieves authorized context, generates the answer, and delivers it
+as an ephemeral Slack message to the requester. The command prints only:
+
+```json
+{"ok": true, "status": "accepted", "delivery": "ephemeral"}
+```
+
+The command never returns messages, citations, or answer text to the agent.
+It prints a fixed error if the API rejects the invocation, fails, or returns
+an unexpected response. The agent should acknowledge the temporary delivery;
+it cannot reuse the answer as context for a later task.
+
+[Ephemeral Slack messages](https://docs.slack.dev/reference/methods/chat.postEphemeral/)
+are temporary and are not guaranteed to remain
+available. The receipt records Slack's acceptance of the delivery, not proof
+that the requester read it.
+
+## Coverage and authorization
+
+Public RTS requests explicitly select public channels and message content.
+Slack applies its event context restrictions, including Slack Connect limits.
+The service does not join channels to expand its search.
+
+Private retrieval verifies conversation type, bot membership, and requester
+membership before reading. It rechecks authorization before delivery and
+rejects uncertain or failed checks. Archived channels remain eligible when
+their access checks pass.
+
+Private search is bounded: at most 10 channels, 100 root messages in total,
+and five threads with at most 50 replies each. Answers disclose limited
+coverage; an empty result does not establish that no earlier discussion exists.
+The service does not download attachments or build a Slack index.
+
+Retrieved content and the generated answer remain outside durable tool
+outputs and session transcripts. This path has no retained search result
+cache. Review model-provider retention settings when configuring the synthesis
+model. See Slack's [Real-time Search guide](https://docs.slack.dev/apis/web-api/real-time-search-api/)
+for the current platform requirements.
+
+## Migrate existing retrieval permissions
+
+This feature's source restrictions apply to `search-answer`. Existing direct
+Slack tools and [indexed company context](/operate/slack-etl) have separate
+permissions. Enabling this feature does not change those permissions.
+
+Before claiming that a session cannot retrieve DMs, inspect its effective
+principal and role grants. Remove or migrate sandbox Slack bot, user-search,
+and ETL credentials, including unrestricted Slack HTTP access and overlay
+tools that use the same credentials.
+
+Remove or migrate database grants that expose Slack history, private-channel
+documents, DM documents, or their underlying tables. Hiding a tool or stopping
+ETL does not revoke access to retained rows. Preserve other company-context
+sources through an appropriately scoped database role when needed.
+
+Use a dedicated enrolled role when a shared role also serves other principals.
+New Slack principals must pass the same enrollment checks before execution;
+default role assignment can otherwise restore the broad grants. Retire old
+sandbox credentials and database connections, and prevent migrated executions
+from replaying legacy retrieved content. Session-read permission is scoped to
+the same principal, but its older sessions can still contain that content.
+Inspect alternate access through observability and connected services as part
+of the effective permission review.
+
+Verify the resulting boundary with synthetic public, private, DM, and group-DM
+canaries through both live tools and indexed reads. Leave ordinary DM ingress
+enabled; the restriction concerns retrieval sources.

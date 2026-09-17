@@ -3,6 +3,8 @@ import type { RustSessionStreamEvent } from '@centaur/harness-events'
 import { isRetryableCodexErrorNotification } from '@centaur/rendering'
 import type { Attachment, LinkPreview, Message } from 'chat'
 import { renderSlackDisplayText, slackMessagePromptText } from './slack-display-text'
+import { withoutSlackActionTokens } from './slack-credentials'
+import { takeSlackSearchCredential } from './request-context'
 import type {
   ForwardSessionInput,
   JsonObject,
@@ -260,7 +262,7 @@ export async function serializeMessage(
     id: message.id,
     isMention: message.isMention === true,
     links: serializeMessageLinks(message.links, message.raw),
-    raw: message.raw,
+    raw: withoutSlackActionTokens(message.raw),
     rawSlackAttachmentCount: displayText.rawAttachmentCount,
     rawSlackBlockCount: displayText.rawBlockCount,
     teamId: slackTeamId(message.raw) as string,
@@ -485,6 +487,15 @@ export async function forwardToSessionApi(
   input: ForwardSessionInput,
   callbacks: ForwardSessionApiCallbacks = {}
 ): Promise<AsyncIterable<SlackbotV2RendererSource> | null> {
+  if (options.slackSearchEnabled) {
+    // Enforce this at the handoff as well as before history collection. Only
+    // this live event can cross into an enrolled agent session.
+    input.executeContextMessages = undefined
+    input.contextPreamble = undefined
+    if (input.executeMessage) {
+      input.messages = input.messages.filter(message => message.id === input.executeMessage?.id)
+    }
+  }
   const createStartedAtMs = nowMs()
   const created = await recordSessionApiOperation('create_session', () =>
     createSession(
@@ -511,7 +522,7 @@ export async function forwardToSessionApi(
     phase_ms: elapsedMs(createStartedAtMs)
   })
   await callbacks.onSessionCreated?.(created)
-  if (created.harnessSwitched) {
+  if (created.harnessSwitched && !options.slackSearchEnabled) {
     await callbacks.onSessionRestarted?.()
   }
   if (input.messages.length > 0) {
@@ -1415,6 +1426,13 @@ async function executeSession(
 ): Promise<SlackbotV2ExecuteSessionResponse> {
   const fetchFn = options.fetch ?? fetch
   const requesterIdentity = await resolveRequesterIdentity(options, message)
+  const searchContextId = await registerSlackSearchContext(options, threadId, message)
+  const searchPreamble = options.slackSearchEnabled
+    ? searchContextId
+      ? `Slack search is available for this turn. For Slack questions, use \`slack search-answer --context ${searchContextId} QUESTION\`. It searches authorized channels and sends a temporary answer visible only to the requester in this Slack conversation. The tool returns a delivery receipt, not the answer or retrieved messages. Do not repeat or reconstruct the answer in the shared reply. Do not use legacy Slack search or another retrieval route if this tool fails.`
+      : 'Slack search is unavailable for this turn because no verified search context could be registered. If the request needs Slack search, explain that it is unavailable and ask the requester to mention the bot again. Do not fall back to legacy Slack search or another retrieval route.'
+    : undefined
+  const executionPreamble = [contextPreamble, searchPreamble].filter(Boolean).join('\n\n') || undefined
   const idleTimeoutMs = sessionIdleTimeoutMs(options)
   const recordedModel = metadataModel ?? model
   const body: SlackbotV2ExecuteSessionRequest = {
@@ -1428,6 +1446,7 @@ async function executeSession(
       message,
       {
         action: 'execute',
+        ...(searchContextId ? { slack_search_context_id: searchContextId } : {}),
         ...(recordedModel ? { model: recordedModel } : {}),
         ...(metadataHarnessType ? { harness_type: metadataHarnessType } : {}),
         ...(harnessAssignment
@@ -1443,7 +1462,7 @@ async function executeSession(
       model,
       requesterIdentity,
       contextMessages,
-      contextPreamble,
+      executionPreamble,
       reasoning,
       provider
     ),
@@ -1463,6 +1482,54 @@ async function executeSession(
   )
   await ensureApiOk(response, 'execute session')
   return (await response.json()) as SlackbotV2ExecuteSessionResponse
+}
+
+async function registerSlackSearchContext(
+  options: SlackbotV2Options,
+  threadId: string,
+  message: SlackbotV2ApiMessage
+): Promise<string | undefined> {
+  if (!options.slackSearchEnabled || message.author.isMe || message.author.isBot) return undefined
+  const credential = takeSlackSearchCredential(threadId, message.id, message.author.userId)
+  if (!credential) return undefined
+  const controller = new AbortController()
+  try {
+    return await withTimeout('register Slack search context', slackApiTimeoutMs(options), async () => {
+      const response = await (options.fetch ?? fetch)(
+        new URL('/api/slack/search-context', ensureTrailingSlash(options.apiUrl)),
+        {
+          method: 'POST',
+          signal: controller.signal,
+          headers: { ...apiHeaders(options), 'x-slack-action-token': credential.actionToken },
+          body: JSON.stringify({
+            thread_key: threadId,
+            message_id: credential.messageId,
+            channel_id: credential.channelId,
+            thread_ts: credential.threadTs,
+            team_id: credential.teamId,
+            user_id: credential.userId
+          })
+        }
+      )
+      // Never echo an upstream body or exception: either can reflect a credential.
+      if (!response.ok) {
+        await response.body?.cancel()
+        throw new Error('registration_failed')
+      }
+      const payload: unknown = await response.json()
+      if (isJsonObject(payload) && payload.ok === true && typeof payload.context_id === 'string'
+        && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(payload.context_id)) {
+        return payload.context_id
+      }
+      throw new Error('registration_failed')
+    })
+  } catch {
+    // A search registration failure must not drop the user's normal turn.
+  } finally {
+    controller.abort()
+  }
+  options.logger?.warn('slackbotv2_slack_search_unavailable', { reason: 'registration_failed' })
+  return undefined
 }
 
 async function postInterruptSessionExecution(

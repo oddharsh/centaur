@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import urlparse
+from uuid import UUID
 
 import asyncpg
 import structlog
@@ -462,11 +463,13 @@ class SlackClient:
             parsed = parsed.replace(tzinfo=UTC)
         return self._format_ts(parsed.timestamp())
 
-    def _centaur_api_url(self) -> str:
+    @staticmethod
+    def _centaur_api_url() -> str:
         """Return the Centaur API base URL available inside agent sandboxes."""
         return secret("CENTAUR_API_URL", "http://api:8000").rstrip("/")
 
-    def _centaur_api_headers(self) -> dict[str, str]:
+    @staticmethod
+    def _centaur_api_headers() -> dict[str, str]:
         """Return headers for API-server calls.
 
         In sandboxes, iron-proxy injects the principal-scoped Authorization
@@ -2552,6 +2555,49 @@ def resolve_mentions(
 
 def search_messages_direct(*args, **kwargs):
     return _client().search_messages_direct(*args, **kwargs)
+
+
+def search_answer(query: str, context_id: str) -> dict[str, Any]:
+    """Request a temporary Slack answer without returning retrieved content.
+
+    The server owns the authenticated audience, source authorization, search,
+    synthesis, and ephemeral delivery. No Slack credential is needed here.
+    Errors and unexpected responses deliberately discard all upstream content.
+    """
+    try:
+        normalized_context = str(UUID(context_id))
+    except (ValueError, TypeError, AttributeError):
+        raise ValueError("context_id must be a UUID") from None
+    if not isinstance(query, str) or not query.strip() or len(query) > 4000:
+        raise ValueError("query must contain 1 to 4000 characters")
+
+    try:
+        headers = SlackClient._centaur_api_headers()
+        headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(
+            f"{SlackClient._centaur_api_url()}/api/slack/search-answer",
+            data=json.dumps({"context_id": normalized_context, "query": query}).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=90) as response:
+            raw = response.read(1025)
+        if len(raw) > 1024:
+            raise ValueError("oversized receipt")
+        receipt = json.loads(raw)
+        if (
+            not isinstance(receipt, dict)
+            or set(receipt) != {"ok", "status", "delivery"}
+            or receipt["ok"] is not True
+            or receipt["status"] != "accepted"
+            or receipt["delivery"] != "ephemeral"
+        ):
+            raise ValueError("invalid receipt")
+    except Exception:
+        # Do not use the ordinary API helpers here: their error messages carry
+        # response bodies, which must never enter a durable tool transcript.
+        raise RuntimeError("slack_search_answer_failed") from None
+    return {"ok": True, "status": "accepted", "delivery": "ephemeral"}
 
 
 def get_channel_history_page(*args, **kwargs):

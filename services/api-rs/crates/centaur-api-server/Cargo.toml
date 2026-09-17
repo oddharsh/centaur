@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+aes-gcm.workspace = true
 axum.workspace = true
 aws-config.workspace = true
 aws-sdk-s3.workspace = true

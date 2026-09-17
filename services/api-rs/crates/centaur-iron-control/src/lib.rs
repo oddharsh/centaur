@@ -33,5 +33,5 @@ pub use registry::{
     gcp_auth_scopes_or_default, grant_inputs_to_role, register_role, secret_inputs_from_fragment,
     source_from_placeholder, unique_foreign_id,
 };
-pub use session::SessionRegistrar;
+pub use session::{SLACK_SEARCH_EPOCH_LABEL, SessionRegistrar, configured_slack_search_epoch};
 pub use util::{managed_labels, slugify};

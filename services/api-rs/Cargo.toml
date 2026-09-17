@@ -33,6 +33,7 @@ todo = "warn"
 unimplemented = "warn"
 
 [workspace.dependencies]
+aes-gcm = "0.10.3"
 anyhow = "1"
 async-trait = "0.1"
 absurd-sdk = { path = "../../crates/absurd-sdk" }

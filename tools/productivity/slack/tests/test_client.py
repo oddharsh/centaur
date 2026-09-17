@@ -1,7 +1,10 @@
 import base64
 import datetime as dt
 import email.message
+import io
 import json
+import urllib.error
+import urllib.request
 
 import pytest
 import slack.client as slack_client
@@ -223,6 +226,116 @@ def _make_slack_error(
         message=message,
         response=_FakeSlackResponse(error=error, status_code=status_code),
     )
+
+
+_SEARCH_CONTEXT_ID = "ce0c0b33-b14e-4a95-9d33-a7e04236f947"
+_SEARCH_RECEIPT = {"ok": True, "status": "accepted", "delivery": "ephemeral"}
+
+
+def test_search_answer_uses_api_auth_without_a_slack_token(monkeypatch) -> None:
+    requests = []
+
+    def fake_urlopen(request, *, timeout):
+        requests.append((request, timeout))
+        return _FakeHTTPResponse(json.dumps(_SEARCH_RECEIPT).encode(), "application/json")
+
+    def no_slack_client(*args, **kwargs):
+        pytest.fail("search-answer must not construct a Slack SDK client")
+
+    monkeypatch.setenv("CENTAUR_API_URL", "http://api.internal:8080/")
+    monkeypatch.setenv("CENTAUR_API_BEARER_TOKEN", "synthetic-api-jwt")
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(slack_client.WebClient, "__init__", no_slack_client)
+
+    assert slack_client.search_answer("What changed?", _SEARCH_CONTEXT_ID) == _SEARCH_RECEIPT
+    request, timeout = requests[0]
+    assert request.full_url == "http://api.internal:8080/api/slack/search-answer"
+    assert request.get_method() == "POST"
+    assert request.get_header("Authorization") == "Bearer synthetic-api-jwt"
+    assert request.get_header("Content-type") == "application/json"
+    assert json.loads(request.data) == {
+        "context_id": _SEARCH_CONTEXT_ID,
+        "query": "What changed?",
+    }
+    assert timeout == 90
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {**_SEARCH_RECEIPT, "text": "PRIVATE-SEARCH-CANARY"},
+        {**_SEARCH_RECEIPT, "status": "PRIVATE-SEARCH-CANARY"},
+        {**_SEARCH_RECEIPT, "ok": 1},
+        {"ok": False, "error": "PRIVATE-SEARCH-CANARY"},
+        ["PRIVATE-SEARCH-CANARY"],
+        None,
+    ],
+)
+def test_search_answer_rejects_unexpected_receipts_without_content(monkeypatch, body) -> None:
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *args, **kwargs: _FakeHTTPResponse(json.dumps(body).encode(), "application/json"),
+    )
+    with pytest.raises(RuntimeError) as error:
+        slack_client.search_answer("What changed?", _SEARCH_CONTEXT_ID)
+    assert str(error.value) == "slack_search_answer_failed"
+    assert error.value.__suppress_context__ is True
+
+
+@pytest.mark.parametrize("body", [b"PRIVATE-SEARCH-CANARY", b"x" * 1025, b"\xff"])
+def test_search_answer_rejects_invalid_or_oversized_response(monkeypatch, body) -> None:
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *args, **kwargs: _FakeHTTPResponse(body, "application/json"),
+    )
+    with pytest.raises(RuntimeError, match=r"^slack_search_answer_failed$"):
+        slack_client.search_answer("What changed?", _SEARCH_CONTEXT_ID)
+
+
+@pytest.mark.parametrize("http_status", [401, 403, 409, 429, 500])
+def test_search_answer_discards_http_error_body(monkeypatch, http_status) -> None:
+    def fail_http(*args, **kwargs):
+        raise urllib.error.HTTPError(
+            "http://api.internal:8080/api/slack/search-answer",
+            http_status,
+            "PRIVATE-SEARCH-CANARY",
+            {},
+            io.BytesIO(b'{"error":"PRIVATE-SEARCH-CANARY"}'),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail_http)
+    with pytest.raises(RuntimeError, match=r"^slack_search_answer_failed$"):
+        slack_client.search_answer("What changed?", _SEARCH_CONTEXT_ID)
+
+
+def test_search_answer_discards_transport_error_details(monkeypatch) -> None:
+    def fail_transport(*args, **kwargs):
+        raise urllib.error.URLError("PRIVATE-SEARCH-CANARY")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail_transport)
+    with pytest.raises(RuntimeError, match=r"^slack_search_answer_failed$"):
+        slack_client.search_answer("What changed?", _SEARCH_CONTEXT_ID)
+
+
+@pytest.mark.parametrize(
+    ("query", "context_id"),
+    [
+        ("", _SEARCH_CONTEXT_ID),
+        ("  ", _SEARCH_CONTEXT_ID),
+        ("x" * 4001, _SEARCH_CONTEXT_ID),
+        ("question", "not-a-uuid"),
+    ],
+)
+def test_search_answer_rejects_invalid_input_before_http(monkeypatch, query, context_id) -> None:
+    def unexpected_http(*args, **kwargs):
+        pytest.fail("invalid request must not reach the API")
+
+    monkeypatch.setattr(urllib.request, "urlopen", unexpected_http)
+    with pytest.raises(ValueError):
+        slack_client.search_answer(query, context_id)
 
 
 def test_send_message_forwards_unfurl_flags() -> None:
