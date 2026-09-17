@@ -128,6 +128,97 @@ afterAll(async () => {
 })
 
 describe('slackbotv2', () => {
+  it('does not collect prior channel history when Slack search is enabled', async () => {
+    bot = createTestBot({ slackSearchEnabled: true })
+    const parent = await postUserMessage('synthetic-pre-enrollment-channel-canary')
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> current request`, parent.ts)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
+      event_id: 'Ev-rts-no-backfill',
+      event: {
+        type: 'app_mention', user: USER_ID, channel: CHANNEL_ID, team: TEAM_ID,
+        ts: mention.ts, thread_ts: parent.ts, text: `<@${BOT_USER_ID}> current request`
+      }
+    }), {}, waitUntilContext(waits))
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(JSON.stringify({ appends: codexApi.appends, executes: codexApi.executes }))
+      .not.toContain('synthetic-pre-enrollment-channel-canary')
+    expect(JSON.stringify(codexApi.executes)).toContain('current request')
+  })
+
+  it('keeps action tokens out of SDK caches, recovery state, logs and session requests', async () => {
+    const canary = 'synthetic-sdk-action-token-canary'
+    const logs: CapturedLog[] = []
+    const registrations: Array<{ body: unknown; headers: Headers }> = []
+    const contextId = '60e800a5-3a6e-4b82-9362-1c44a7c94b95'
+    const writes: Array<{ key: string; value: unknown }> = []
+    const state = createMemoryState()
+    const set = state.set.bind(state)
+    state.set = async (key, value, ttlMs) => {
+      writes.push({ key, value: JSON.parse(JSON.stringify(value)) })
+      await set(key, value, ttlMs)
+    }
+    const appendToList = state.appendToList.bind(state)
+    state.appendToList = async (key, value, options) => {
+      writes.push({ key, value: JSON.parse(JSON.stringify(value)) })
+      await appendToList(key, value, options)
+    }
+    bot = createTestBot({
+      state, logger: captureLogger(logs), slackSearchEnabled: true,
+      fetch: async (input, init) => {
+        if (String(input).endsWith('/api/slack/search-context')) {
+          registrations.push({ body: JSON.parse(String(init?.body)), headers: new Headers(init?.headers) })
+          expect(codexApi.creates).toHaveLength(1)
+          expect(codexApi.executes).toHaveLength(0)
+          return Response.json({ ok: true, context_id: contextId })
+        }
+        return fetch(input, init)
+      }
+    })
+    // Exercise the SDK's supported history persistence path as well as the
+    // application's render obligations, which retain raw message metadata.
+    Object.assign(bot.chat.getAdapter('slack'), { persistThreadHistory: true })
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> credential hygiene`)
+    const waits: Promise<unknown>[] = []
+    const response = await bot.app.request('/api/webhooks/slack', signedSlackEvent({
+      event_id: 'Ev-action-token-hygiene',
+      event: {
+        type: 'app_mention',
+        action_token: canary,
+        raw: { action_token: canary, keep: 'harmless-metadata' },
+        reactions: [{ name: 'eyes', users: [USER_ID], count: 1 }],
+        user: USER_ID,
+        channel: CHANNEL_ID,
+        team: TEAM_ID,
+        ts: mention.ts,
+        text: `<@${BOT_USER_ID}> credential hygiene`
+      }
+    }), {}, waitUntilContext(waits))
+    expect(response.status).toBe(200)
+    await Promise.all(waits)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(registrations).toHaveLength(1)
+    expect(registrations[0]!.headers.get('x-slack-action-token')).toBe(canary)
+    expect(registrations[0]!.headers.get('authorization')).toBe('Bearer slackbotv2-api-key')
+    expect(registrations[0]!.body).toEqual({
+      thread_key: `slack:${CHANNEL_ID}:${mention.ts}`, message_id: mention.ts,
+      channel_id: CHANNEL_ID, thread_ts: mention.ts, team_id: TEAM_ID, user_id: USER_ID
+    })
+    expect(codexApi.executes[0]!.body.metadata?.slack_search_context_id).toBe(contextId)
+    expect(codexApi.executes[0]!.body.input_lines.join('\n')).toContain(`slack search-answer --context ${contextId}`)
+    expect(writes.some(write => write.key.startsWith('msg-history:'))).toBe(true)
+    const recovery = writes.find(write => isRecord(write.value) && write.value.renderObligation)
+    expect(recovery).toBeDefined()
+    const recoveryText = JSON.stringify(recovery)
+    expect(recoveryText).toContain('harmless-metadata')
+    expect(recoveryText).toContain('reactions')
+    expect(JSON.stringify({ writes, logs, appends: codexApi.appends, executes: codexApi.executes }))
+      .not.toContain(canary)
+    expect(logs.some(log => log.level === 'debug')).toBe(true)
+  })
+
   for (const agentViewEnabled of [false, true]) {
     it(`routes DM roots and replies with agent view ${agentViewEnabled}`, async () => {
       bot = createTestBot({ agentViewEnabled })
@@ -372,6 +463,7 @@ describe('slackbotv2', () => {
         route,
         signedSlackInteraction({
           type: 'block_actions',
+          action_token: 'synthetic-form-action-token-canary',
           team: { id: TEAM_ID },
           user: {
             id: USER_ID,
@@ -380,7 +472,11 @@ describe('slackbotv2', () => {
             team_id: TEAM_ID
           },
           channel: { id: CHANNEL_ID },
-          message: { ts: `1700000001.00020${index}`, thread_ts: '1700000001.000100' },
+          message: {
+            action_token: 'synthetic-form-action-token-canary',
+            ts: `1700000001.00020${index}`,
+            thread_ts: '1700000001.000100'
+          },
           ...(index === 1
             ? {
                 container: {
@@ -1814,6 +1910,52 @@ describe('slackbotv2', () => {
     const executeInput = JSON.stringify(JSON.parse(codexApi.executes[0]!.body.input_lines[0]!))
     expect(executeInput).toContain(`"dataBase64":"${Buffer.from('captured-image').toString('base64')}"`)
     expect(executeInput).toContain('"attachment_type":"image"')
+  })
+
+  it('rejects a tampered late-file event without consuming its pending repair', async () => {
+    const logs: CapturedLog[] = []
+    bot = createTestBot({ logger: captureLogger(logs) })
+    const mention = await postUserMessage(`<@${BOT_USER_ID}> inspect the delayed image`)
+    const mentionWaits: Promise<unknown>[] = []
+    await bot.app.request('/api/webhooks/slack', signedSlackEvent({
+      event_id: 'Ev-late-file-signature-mention',
+      event: {
+        type: 'app_mention', user: USER_ID, channel: CHANNEL_ID, team: TEAM_ID,
+        ts: mention.ts, text: `<@${BOT_USER_ID}> inspect the delayed image`
+      }
+    }), {}, waitUntilContext(mentionWaits))
+    await Promise.all(mentionWaits)
+    expect(codexApi.executes).toHaveLength(1)
+
+    const signed = signedSlackEvent({
+      event_id: 'Ev-late-file-signature-file',
+      event: {
+        type: 'message', user: USER_ID, channel: CHANNEL_ID, team: TEAM_ID,
+        ts: incrementSlackTs(mention.ts, 2), text: '',
+        action_token: 'synthetic-late-file-action-token-canary',
+        files: [{
+          id: 'F-signature-file', mimetype: 'image/png', name: 'trusted.png', size: 16,
+          url_private: `${slackApi.url}/files/captured.png`
+        }]
+      }
+    })
+    const rejectedWaits: Promise<unknown>[] = []
+    const rejected = await bot.app.request('/api/webhooks/slack', {
+      ...signed,
+      body: String(signed.body).replace('trusted.png', 'tampered.png')
+    }, {}, waitUntilContext(rejectedWaits))
+    expect(rejected.status).toBe(401)
+    await Promise.all(rejectedWaits)
+    expect(codexApi.executes).toHaveLength(1)
+    expect(codexApi.appends).toHaveLength(1)
+
+    const acceptedWaits: Promise<unknown>[] = []
+    const accepted = await bot.app.request('/api/webhooks/slack', signed, {}, waitUntilContext(acceptedWaits))
+    expect(accepted.status).toBe(200)
+    await Promise.all(acceptedWaits)
+    expect(codexApi.executes).toHaveLength(2)
+    expect(JSON.stringify({ logs, appends: codexApi.appends, executes: codexApi.executes }))
+      .not.toContain('synthetic-late-file-action-token-canary')
   })
 
   it('repairs delayed Slack Connect file-only messages as a follow-up turn', async () => {

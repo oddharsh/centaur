@@ -19,6 +19,16 @@ on:
       - .agents/skills/**
   pull_request:
   workflow_dispatch:
+    inputs:
+      services:
+        description: "Comma-separated services to publish, or all"
+        type: string
+        default: all
+      rust_build_profile:
+        description: "Use release for production deployments"
+        type: choice
+        options: [debug, release]
+        default: debug
 
 concurrency:
   group: publish-images-${{ github.ref }}
@@ -31,73 +41,54 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAMESPACE: paradigmxyz/centaur
-  IMAGE_SOURCE: https://github.com/paradigmxyz/centaur
-  # Main/tags keep optimized release images. PRs and manual branch publishes
-  # use debug builds so staging/dev iteration does not spend minutes optimizing
-  # Rust binaries that are immediately replaced by the next test build.
-  RUST_BUILD_PROFILE: ${{ (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && 'debug' || 'release' }}
+  IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
+  # Main/tags keep optimized release images. Manual publishes default to debug,
+  # but production releases can request the same release profile as main.
+  RUST_BUILD_PROFILE: ${{ inputs.rust_build_profile || ((github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && 'debug' || 'release') }}
 
 jobs:
-  # Build each image with Depot's hosted builders, push by digest, and hand
-  # the digests to the merge job below which assembles the multi-arch manifest.
-  # arm64 is only built on pushes to main and release tags — PR and manual
-  # dispatch builds stay amd64-only to keep iteration fast. Fork PRs skip both
-  # jobs so untrusted changes do not run on the hosted image builders.
+  prepare:
+    # Forks publish only on explicit dispatch and only to their own namespace.
+    # Preserve upstream push/PR publishing, excluding untrusted fork PRs.
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.repository == 'paradigmxyz/centaur' && (github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork)) }}
+    runs-on: ubuntu-24.04
+    outputs:
+      services: ${{ steps.select.outputs.services }}
+      namespace: ${{ steps.select.outputs.namespace }}
+    steps:
+      - name: Select services
+        id: select
+        env:
+          REQUESTED_SERVICES: ${{ inputs.services || 'all' }}
+        run: |
+          python3 - <<'PYTHON'
+          import json
+          import os
+
+          available = ["api-rs", "slackbotv2", "linearbot", "discordbot", "githubbot", "teamsbot", "agent", "iron-proxy", "console"]
+          requested = os.environ["REQUESTED_SERVICES"].strip()
+          services = available if requested == "all" else [item.strip() for item in requested.split(",")]
+          if not services or any(service not in available for service in services) or len(set(services)) != len(services):
+              raise SystemExit("Invalid services: choose unique names from " + ", ".join(available))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("services=" + json.dumps(services, separators=(",", ":")) + "\n")
+              output.write("namespace=" + os.environ["GITHUB_REPOSITORY"].lower() + "\n")
+          PYTHON
+
+  # Upstream uses Depot; explicit fork publishes use GitHub-hosted Buildx.
+  # Main/tag pushes remain multi-arch. PR/manual publishes remain amd64-only.
+  # Both builders export digests for the same manifest publishing path below.
   build:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
-    runs-on: ${{ matrix.platform == 'linux/arm64' && 'depot-ubuntu-24.04-arm-16' || 'depot-ubuntu-24.04-16' }}
+    needs: prepare
+    runs-on: ${{ github.repository != 'paradigmxyz/centaur' && 'ubuntu-24.04' || (matrix.platform == 'linux/arm64' && 'depot-ubuntu-24.04-arm-16' || 'depot-ubuntu-24.04-16') }}
+    env:
+      IMAGE_NAMESPACE: ${{ needs.prepare.outputs.namespace }}
+      IMAGE_NAME: centaur-${{ matrix.service }}
     strategy:
       fail-fast: false
       matrix:
-        service: [api-rs, slackbotv2, linearbot, discordbot, githubbot, teamsbot, agent, iron-proxy, console]
+        service: ${{ fromJSON(needs.prepare.outputs.services) }}
         platform: ${{ github.event_name == 'push' && fromJSON('["linux/amd64", "linux/arm64"]') || fromJSON('["linux/amd64"]') }}
-        include:
-          - service: api-rs
-            image: centaur-api-rs
-            context: .
-            dockerfile: services/api-rs/Dockerfile
-            target: ""
-          - service: slackbotv2
-            image: centaur-slackbotv2
-            context: .
-            dockerfile: services/slackbotv2/Dockerfile
-            target: ""
-          - service: linearbot
-            image: centaur-linearbot
-            context: .
-            dockerfile: services/linearbot/Dockerfile
-            target: ""
-          - service: discordbot
-            image: centaur-discordbot
-            context: .
-            dockerfile: services/discordbot/Dockerfile
-            target: ""
-          - service: githubbot
-            image: centaur-githubbot
-            context: .
-            dockerfile: services/githubbot/Dockerfile
-            target: ""
-          - service: teamsbot
-            image: centaur-teamsbot
-            context: .
-            dockerfile: services/teamsbot/Dockerfile
-            target: ""
-          - service: agent
-            image: centaur-agent
-            context: .
-            dockerfile: services/sandbox/Dockerfile
-            target: sandbox
-          - service: iron-proxy
-            image: centaur-iron-proxy
-            context: .
-            dockerfile: services/iron-proxy/Dockerfile
-            target: ""
-          - service: console
-            image: centaur-console
-            context: services/console
-            dockerfile: services/console/Dockerfile
-            target: ""
 
     steps:
       - name: Checkout
@@ -105,13 +96,28 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Reclaim hosted runner disk for fork image builds
+        if: github.repository != 'paradigmxyz/centaur'
+        run: |
+          # Image toolchains run inside Docker. Reclaim only unused SDKs on
+          # this disposable runner; retain Docker, Node, Python and the checkout.
+          df -h / /var/lib/docker
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet \
+            /usr/local/.ghcup /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h / /var/lib/docker
+
       - name: Derive platform slug
         run: |
           platform="${{ matrix.platform }}"
           echo "PLATFORM_SLUG=${platform//\//-}" >> "$GITHUB_ENV"
 
       - name: Set up Depot
+        if: github.repository == 'paradigmxyz/centaur'
         uses: depot/setup-action@91bc8495a33ebfc504ffc89e5674379ccf23c29c # v1.7.2
+
+      - name: Set up Docker Buildx for fork publish
+        if: github.repository != 'paradigmxyz/centaur'
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -120,73 +126,83 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Docker metadata for ${{ matrix.image }}
+      - name: Docker metadata for ${{ env.IMAGE_NAME }}
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }}
           labels: |
-            org.opencontainers.image.title=${{ matrix.image }}
+            org.opencontainers.image.title=${{ env.IMAGE_NAME }}
             org.opencontainers.image.source=${{ env.IMAGE_SOURCE }}
         env:
           DOCKER_METADATA_PR_HEAD_SHA: true
 
-      - name: Build and push ${{ matrix.image }} (${{ matrix.platform }})
-        id: build
+      - name: Build and push ${{ env.IMAGE_NAME }} (${{ matrix.platform }})
+        if: github.repository == 'paradigmxyz/centaur'
+        id: depot-build
         uses: depot/build-push-action@98e78adca7817480b8185f474a400b451d74e287 # v1.18.0
         with:
           project: d8qqlh1bmq
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
-          target: ${{ matrix.target }}
+          context: ${{ matrix.service == 'console' && 'services/console' || '.' }}
+          file: ${{ matrix.service == 'agent' && 'services/sandbox/Dockerfile' || format('services/{0}/Dockerfile', matrix.service) }}
+          target: ${{ matrix.service == 'agent' && 'sandbox' || '' }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           # Tags are applied by the merge job on the multi-arch manifest;
-          # per-arch builds are pushed by digest only. The fork check is also
-          # enforced at the job level so external PRs do not build.
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=${{ !github.event.pull_request.head.repo.fork }}
+          # per-arch builds are pushed by digest only. External PRs are excluded
+          # by the prepare job before any registry-authenticated jobs run.
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ !github.event.pull_request.head.repo.fork }}
           build-args: |
             RUST_BUILD_PROFILE=${{ env.RUST_BUILD_PROFILE }}
+
+      - name: Build and push ${{ env.IMAGE_NAME }} with Buildx (${{ matrix.platform }})
+        if: github.repository != 'paradigmxyz/centaur'
+        id: buildx-build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ${{ matrix.service == 'console' && 'services/console' || '.' }}
+          file: ${{ matrix.service == 'agent' && 'services/sandbox/Dockerfile' || format('services/{0}/Dockerfile', matrix.service) }}
+          target: ${{ matrix.service == 'agent' && 'sandbox' || '' }}
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            RUST_BUILD_PROFILE=${{ env.RUST_BUILD_PROFILE }}
+          cache-from: type=gha,scope=${{ matrix.service }}-${{ env.RUST_BUILD_PROFILE }}
+          cache-to: type=gha,scope=${{ matrix.service }}-${{ env.RUST_BUILD_PROFILE }},mode=max
 
       - name: Export digest
         if: ${{ !github.event.pull_request.head.repo.fork }}
         run: |
           mkdir -p ${{ runner.temp }}/digests
-          digest="${{ steps.build.outputs.digest }}"
+          digest="${{ steps.depot-build.outputs.digest || steps.buildx-build.outputs.digest }}"
           touch "${{ runner.temp }}/digests/${digest#sha256:}"
 
       - name: Upload digest
         if: ${{ !github.event.pull_request.head.repo.fork }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: digests-${{ matrix.image }}-${{ env.PLATFORM_SLUG }}
+          name: digests-${{ env.IMAGE_NAME }}-${{ env.PLATFORM_SLUG }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
 
   merge:
-    runs-on: depot-ubuntu-24.04-16
-    needs: build
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork }}
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04-16' || 'ubuntu-24.04' }}
+    needs: [prepare, build]
+    env:
+      IMAGE_NAMESPACE: ${{ needs.prepare.outputs.namespace }}
+      IMAGE_NAME: centaur-${{ matrix.service }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - image: centaur-api-rs
-          - image: centaur-slackbotv2
-          - image: centaur-linearbot
-          - image: centaur-agent
-          - image: centaur-iron-proxy
-          - image: centaur-console
-          - image: centaur-discordbot
-          - image: centaur-githubbot
-          - image: centaur-teamsbot
+        service: ${{ fromJSON(needs.prepare.outputs.services) }}
 
     steps:
       - name: Download digests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: digests-${{ matrix.image }}-*
+          pattern: digests-${{ env.IMAGE_NAME }}-*
           path: ${{ runner.temp }}/digests
           merge-multiple: true
 
@@ -200,11 +216,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Docker metadata for ${{ matrix.image }}
+      - name: Docker metadata for ${{ env.IMAGE_NAME }}
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }}
           flavor: |
             latest=false
           tags: |
@@ -216,26 +232,26 @@ jobs:
             type=ref,event=pr
             type=sha
           labels: |
-            org.opencontainers.image.title=${{ matrix.image }}
+            org.opencontainers.image.title=${{ env.IMAGE_NAME }}
             org.opencontainers.image.source=${{ env.IMAGE_SOURCE }}
         env:
           DOCKER_METADATA_PR_HEAD_SHA: true
 
-      - name: Create multi-arch manifest for ${{ matrix.image }}
+      - name: Create multi-arch manifest for ${{ env.IMAGE_NAME }}
         working-directory: ${{ runner.temp }}/digests
         run: |
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}@sha256:%s ' *)
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
 
       - name: Inspect manifest
         run: |
-          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:${{ steps.meta.outputs.version }}
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
 
   notify-centaur-paradigm:
     name: Notify Paradigm Overlay
     needs: merge
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.repository == 'paradigmxyz/centaur' && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: centaur-paradigm-dispatch
     permissions: {}

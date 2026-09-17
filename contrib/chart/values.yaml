@@ -627,6 +627,10 @@ slackbotv2:
   # Join newly-created public channels after subscribed channel_created events.
   # Requires the Slack app to grant channels:read and channels:join.
   autoJoinCreatedChannels: false
+  # Register temporary search invocations for requester-only Slack answers.
+  # Enable after granting the Slack app search:read.public and configuring the
+  # API synthesis model. This does not change legacy tool or index permissions.
+  slackSearchEnabled: false
   # Sticky percentage of otherwise-default Codex Slack threads assigned to
   # Nanocodex. A non-default model selection bypasses the rollout.
   codexNanocodexRolloutPercent: 0
