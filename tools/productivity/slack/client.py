@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import urlparse
+from uuid import UUID
 
 import structlog
 from slack_sdk import WebClient
@@ -307,11 +308,13 @@ class SlackClient:
             parsed = parsed.replace(tzinfo=UTC)
         return self._format_ts(parsed.timestamp())
 
-    def _centaur_api_url(self) -> str:
+    @staticmethod
+    def _centaur_api_url() -> str:
         """Return the Centaur API base URL available inside agent sandboxes."""
         return secret("CENTAUR_API_URL", "http://api:8000").rstrip("/")
 
-    def _centaur_api_headers(self) -> dict[str, str]:
+    @staticmethod
+    def _centaur_api_headers() -> dict[str, str]:
         """Return headers for API-server calls.
 
         In sandboxes, iron-proxy injects the principal-scoped Authorization
@@ -421,8 +424,23 @@ class SlackClient:
         return body, headers
 
     def _message_permalink(self, channel_id: str, ts: str) -> str:
-        """Build a Slack permalink from channel and timestamp."""
+        """Build a generic fallback permalink from channel and timestamp."""
         return f"https://slack.com/archives/{channel_id}/p{ts.replace('.', '')}"
+
+    def _canonical_message_permalink(self, channel_id: str, ts: str) -> str:
+        """Ask Slack for the workspace-aware permalink for a message."""
+        try:
+            response = self._retry_on_ratelimit(
+                self._client.chat_getPermalink,
+                method_key="chat.getPermalink",
+                channel=channel_id,
+                message_ts=ts,
+            )
+        except (SlackApiError, SlackRateLimitError):
+            return self._message_permalink(channel_id, ts)
+
+        permalink = str(response.get("permalink") or "").strip()
+        return permalink or self._message_permalink(channel_id, ts)
 
     def _resolve_channel_name(self, channel: str, channel_id: str) -> str:
         """Resolve a human-readable channel name when callers passed an ID."""
@@ -754,16 +772,8 @@ class SlackClient:
         limit: int,
         user_cache: dict[str, str],
     ) -> list[dict]:
-        """Fetch history for a single search fallback channel."""
-        try:
-            response = self.get_channel_history_proxy(channel_id, limit=limit)
-        except (RuntimeError, ValueError):
-            return self._fetch_direct_channel_history_for_search(
-                channel_id,
-                channel_name,
-                limit,
-                user_cache,
-            )
+        """Fetch authorized history without bypassing the broker on failure."""
+        response = self.get_channel_history_proxy(channel_id, limit=limit)
 
         messages = []
         for msg in response.get("messages", []):
@@ -775,54 +785,6 @@ class SlackClient:
                     channel_name=channel_name,
                 )
             )
-
-        return messages
-
-    _MAX_SEARCH_DIRECT_THREADS = 10
-
-    def _fetch_direct_channel_history_for_search(
-        self,
-        channel_id: str,
-        channel_name: str,
-        limit: int,
-        user_cache: dict[str, str],
-    ) -> list[dict]:
-        """Fetch direct Slack history and expand a bounded number of threads."""
-        try:
-            page = self.get_channel_history_page(channel_id, limit=limit)
-        except (RuntimeError, ValueError):
-            return []
-
-        messages = [{**msg, "channel": channel_name} for msg in page.get("messages", [])]
-        seen_timestamps = {message.get("timestamp") for message in messages}
-        expanded_threads = 0
-
-        for message in list(messages):
-            if expanded_threads >= self._MAX_SEARCH_DIRECT_THREADS:
-                break
-            if int(message.get("reply_count") or 0) <= 0:
-                continue
-
-            thread_ts = message.get("thread_ts") or message.get("timestamp")
-            if not thread_ts:
-                continue
-
-            try:
-                thread_page = self.get_thread_replies_page(
-                    channel=channel_id,
-                    thread_ts=thread_ts,
-                    limit=min(limit, self._DEFAULT_THREAD_REPLY_LIMIT),
-                )
-            except (RuntimeError, ValueError):
-                continue
-
-            expanded_threads += 1
-            for reply in thread_page.get("messages", []):
-                timestamp = reply.get("timestamp")
-                if not timestamp or timestamp in seen_timestamps:
-                    continue
-                seen_timestamps.add(timestamp)
-                messages.append({**reply, "channel": channel_name})
 
         return messages
 
@@ -1097,11 +1059,9 @@ class SlackClient:
             }
 
             for future in as_completed(futures):
-                try:
-                    messages = future.result()
-                    all_messages.extend(messages)
-                except Exception:
-                    pass
+                # An authorization or transport failure is not an empty search.
+                # The broker remains authoritative for every requested channel.
+                all_messages.extend(future.result())
 
         scored_results = []
         for msg in all_messages:
@@ -1125,7 +1085,12 @@ class SlackClient:
         for msg in scored_results:
             del msg["_score"]
 
-        return scored_results[:max_results]
+        results = scored_results[:max_results]
+        for msg in results:
+            msg["permalink"] = self._canonical_message_permalink(
+                msg["channel_id"], msg["timestamp"]
+            )
+        return results
 
     def get_channel_history_page(
         self,
@@ -1852,10 +1817,11 @@ class SlackClient:
                 kwargs["unfurl_media"] = unfurl_media
             response = self._client.chat_postMessage(**kwargs)
             response_channel = str(response.get("channel") or channel_id)
+            response_ts = str(response.get("ts") or "")
             return {
                 "channel": response_channel,
-                "ts": response.get("ts", ""),
-                "permalink": f"https://slack.com/archives/{response_channel}/p{response.get('ts', '').replace('.', '')}",
+                "ts": response_ts,
+                "permalink": self._canonical_message_permalink(response_channel, response_ts),
             }
         except SlackApiError as e:
             raise RuntimeError(f"Slack API error: {e.response['error']}") from e
@@ -2547,6 +2513,11 @@ def get_user_cache(client: SlackClient | None = None) -> dict[str, str]:
     return slack_client._get_user_cache()
 
 
+def resolve_channel(channel: str) -> str:
+    """Resolve a destination using the same channel cache as send_message."""
+    return _client()._resolve_channel(channel)
+
+
 def list_bot_channels(*args, **kwargs):
     return _client().list_bot_channels(*args, **kwargs)
 
@@ -2561,6 +2532,49 @@ def resolve_mentions(
 
 def search_messages(*args, **kwargs):
     return _client().search_messages(*args, **kwargs)
+
+
+def search_answer(query: str, context_id: str) -> dict[str, Any]:
+    """Request a temporary Slack answer without returning retrieved content.
+
+    The server owns the authenticated audience, source authorization, search,
+    synthesis, and ephemeral delivery. No Slack credential is needed here.
+    Errors and unexpected responses deliberately discard all upstream content.
+    """
+    try:
+        normalized_context = str(UUID(context_id))
+    except (ValueError, TypeError, AttributeError):
+        raise ValueError("context_id must be a UUID") from None
+    if not isinstance(query, str) or not query.strip() or len(query) > 4000:
+        raise ValueError("query must contain 1 to 4000 characters")
+
+    try:
+        headers = SlackClient._centaur_api_headers()
+        headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(
+            f"{SlackClient._centaur_api_url()}/api/slack/search-answer",
+            data=json.dumps({"context_id": normalized_context, "query": query}).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=90) as response:
+            raw = response.read(1025)
+        if len(raw) > 1024:
+            raise ValueError("oversized receipt")
+        receipt = json.loads(raw)
+        if (
+            not isinstance(receipt, dict)
+            or set(receipt) != {"ok", "status", "delivery"}
+            or receipt["ok"] is not True
+            or receipt["status"] != "accepted"
+            or receipt["delivery"] != "ephemeral"
+        ):
+            raise ValueError("invalid receipt")
+    except Exception:
+        # Do not use the ordinary API helpers here: their error messages carry
+        # response bodies, which must never enter a durable tool transcript.
+        raise RuntimeError("slack_search_answer_failed") from None
+    return {"ok": True, "status": "accepted", "delivery": "ephemeral"}
 
 
 def get_channel_history_page(*args, **kwargs):
