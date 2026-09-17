@@ -47,7 +47,7 @@ jobs:
 
   web:
     name: Console web (typecheck, lint, test, build)
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04-16' || 'ubuntu-24.04' }}
     needs: console_changes
     if: needs.console_changes.outputs.relevant == 'true'
     defaults:
@@ -84,7 +84,7 @@ jobs:
         run: pnpm build
 
   scan_ruby:
-    runs-on: depot-ubuntu-24.04
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     needs: console_changes
     if: needs.console_changes.outputs.relevant == 'true'
 
@@ -109,7 +109,7 @@ jobs:
           fi
 
   lint:
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04-16' || 'ubuntu-24.04' }}
     needs: console_changes
     if: needs.console_changes.outputs.relevant == 'true'
     env:
@@ -138,7 +138,7 @@ jobs:
         run: bin/rubocop -f github
 
   test:
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04-16' || 'ubuntu-24.04' }}
     needs: console_changes
     if: needs.console_changes.outputs.relevant == 'true'
 
