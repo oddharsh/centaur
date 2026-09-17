@@ -7,6 +7,8 @@ mod mcp;
 mod routes;
 mod slack_external_teams;
 mod slack_proxy;
+mod slack_search;
+mod slack_search_context;
 mod tool_discovery;
 pub mod types;
 
@@ -18,6 +20,7 @@ pub use routes::{
     build_router_with_session_and_workflow_runtime, build_router_with_session_runtime,
 };
 pub use slack_external_teams::partition_slack_external_team_ids;
+pub use slack_search_context::spawn_slack_search_cleanup;
 pub use tool_discovery::{
     DiscoveredToolProxyFragment, ToolDiscoveryConfig, ToolDiscoveryError,
     discover_persona_registry, discover_tool_proxy_fragment,
@@ -80,7 +83,7 @@ mod tests {
         .unwrap()
     }
 
-    fn principal_token(subject: &str) -> String {
+    pub(crate) fn principal_token(subject: &str) -> String {
         encode(
             &Header::new(Algorithm::HS256),
             &json!({
@@ -106,7 +109,7 @@ mod tests {
     }
 
     #[derive(Clone, Copy)]
-    struct TestSessionPrincipalRegistrar;
+    pub(crate) struct TestSessionPrincipalRegistrar;
 
     #[async_trait]
     impl SessionPrincipalRegistrar for TestSessionPrincipalRegistrar {
@@ -221,6 +224,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn slack_search_routes_separate_ingress_from_principal_authority() {
+        let principal = principal_token("prn_test");
+        let console = console_token();
+        for (route, token, expected) in [
+            ("search-context", principal.as_str(), StatusCode::FORBIDDEN),
+            ("search-context", console.as_str(), StatusCode::FORBIDDEN),
+            (
+                "search-context",
+                "test-slackbot-key",
+                StatusCode::BAD_REQUEST,
+            ),
+            ("search-answer", principal.as_str(), StatusCode::BAD_REQUEST),
+            ("search-answer", console.as_str(), StatusCode::FORBIDDEN),
+            ("search-answer", "test-slackbot-key", StatusCode::FORBIDDEN),
+        ] {
+            let response = build_router_with_app_state(AppState::unready(test_auth_with_slack()))
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(format!("/api/slack/{route}"))
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(r#"{"unexpected":"SYNTHETIC-CANARY"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{route}");
+            let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            assert!(!String::from_utf8_lossy(&body).contains("SYNTHETIC-CANARY"));
+        }
     }
 
     #[tokio::test]
@@ -1108,7 +1145,7 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct TestBackend {
+    pub(crate) struct TestBackend {
         next_id: AtomicU64,
     }
 

@@ -261,6 +261,7 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
             get(get_slack_external_team_ids).put(replace_slack_external_team_ids),
         )
         .merge(slack_proxy_router())
+        .merge(crate::slack_search_context::router())
         .route("/api/workflows/schedules", get(list_workflow_schedules))
         .route(
             "/api/workflows/runs",
@@ -429,6 +430,7 @@ enum RouteAccess {
     /// Session write access, held by an API client (confined to its own
     /// namespace) or an operator; ingress keys are excluded.
     ApiClientOrOperatorSessionWrite,
+    SlackIngress,
 }
 
 async fn authorize_api_request(
@@ -478,6 +480,9 @@ async fn authorize_api_request(
     };
 
     let allowed = match access {
+        RouteAccess::SlackIngress => {
+            caller.class() == CallerClass::Ingress && caller.identity() == "slackbot"
+        }
         RouteAccess::Capability(capability) => caller.has_capability(capability),
         RouteAccess::PrincipalOnly => caller.class() == CallerClass::Principal,
         RouteAccess::ApiClientOrOperatorSessionWrite => {
@@ -597,6 +602,7 @@ fn route_access(method: &Method, route: &str) -> Option<RouteAccess> {
         }
         // Keep other methods out of the principal-only `/api/slack/` family.
         (_, "/api/slack/external-team-ids") => None,
+        (&Method::POST, "/api/slack/search-context") => Some(RouteAccess::SlackIngress),
         (_, route) if route.starts_with("/api/slack/") => Some(RouteAccess::PrincipalOnly),
         (_, route) if route.starts_with("/api/admin/slack/dm-sync/") => {
             capability(Capability::AdminSync)
@@ -845,7 +851,7 @@ async fn execute_session(
             admit_api_client_execution(&state, &runtime, &client, &thread_key).await?;
             Some(api_client_metadata(client.client_id(), request.metadata))
         }
-        None => sanitize_execute_metadata(caller.class(), request.metadata),
+        None => sanitize_execute_metadata(caller.class(), caller.identity(), request.metadata),
     };
     let execution = runtime
         .enqueue_session_execution(
@@ -892,12 +898,20 @@ async fn admit_api_client_execution(
 /// the runtime can safely honor Console requesters on any thread namespace.
 fn sanitize_execute_metadata(
     caller_class: CallerClass,
+    caller_identity: &str,
     mut metadata: Option<Value>,
 ) -> Option<Value> {
     if caller_class != CallerClass::Console
         && let Some(Value::Object(fields)) = metadata.as_mut()
     {
         fields.remove("requester_principal_foreign_id");
+    }
+    // A search context asserts identity from a signed Slack event. Other
+    // ingress integrations and ordinary callers cannot attach this capability.
+    if !(caller_class == CallerClass::Ingress && caller_identity == "slackbot")
+        && let Some(Value::Object(fields)) = metadata.as_mut()
+    {
+        fields.remove("slack_search_context_id");
     }
     metadata
 }
@@ -1116,7 +1130,7 @@ mod session_authorization_tests {
         });
 
         assert_eq!(
-            sanitize_execute_metadata(CallerClass::Console, Some(metadata.clone())),
+            sanitize_execute_metadata(CallerClass::Console, "console", Some(metadata.clone())),
             Some(metadata.clone())
         );
         for caller_class in [
@@ -1125,10 +1139,30 @@ mod session_authorization_tests {
             CallerClass::Principal,
         ] {
             assert_eq!(
-                sanitize_execute_metadata(caller_class, Some(metadata.clone())),
+                sanitize_execute_metadata(caller_class, "test", Some(metadata.clone())),
                 Some(json!({ "source": "console" }))
             );
         }
+    }
+
+    #[test]
+    fn only_the_slack_ingress_may_bind_a_search_context() {
+        let metadata = json!({"slack_search_context_id": "context", "message_id": "1.2"});
+        for (class, identity) in [
+            (CallerClass::Console, "console"),
+            (CallerClass::Admin, "admin"),
+            (CallerClass::Principal, "slackbot"),
+            (CallerClass::Ingress, "discordbot"),
+        ] {
+            assert_eq!(
+                sanitize_execute_metadata(class, identity, Some(metadata.clone())),
+                Some(json!({"message_id": "1.2"}))
+            );
+        }
+        assert_eq!(
+            sanitize_execute_metadata(CallerClass::Ingress, "slackbot", Some(metadata.clone())),
+            Some(metadata)
+        );
     }
 }
 

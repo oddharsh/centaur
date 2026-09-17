@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+aes-gcm.workspace = true
 axum.workspace = true
 base64.workspace = true
 centaur-console-db.workspace = true
