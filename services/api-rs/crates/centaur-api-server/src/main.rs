@@ -125,6 +125,7 @@ async fn initialize_runtime(args: Args, app_state: AppState) -> Result<(), Serve
         }
     }
 
+    centaur_api_server::spawn_slack_search_cleanup(pool.clone());
     app_state.mark_ready_with_workflow_host(
         runtime,
         workflows,

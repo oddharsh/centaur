@@ -1,5 +1,6 @@
 mod cleanup;
 mod retention;
+mod slack_search_epoch;
 mod title_generator;
 
 use std::{
@@ -169,6 +170,7 @@ pub struct SessionRuntime {
     execution_spans: ExecutionSpanRegistry,
     iron_control: Arc<dyn SessionPrincipalRegistrar>,
     session_principal_admission: SessionPrincipalAdmission,
+    slack_search_epoch: Option<String>,
     warm_pool: Option<Arc<WarmPoolManager>>,
     personas: Option<Arc<PersonaRegistry>>,
     session_title_generator: Option<SessionTitleGenerator>,
@@ -995,6 +997,7 @@ impl SessionRuntime {
             execution_spans: Arc::new(Mutex::new(HashMap::new())),
             iron_control: Arc::new(iron_control),
             session_principal_admission: SessionPrincipalAdmission::default(),
+            slack_search_epoch: centaur_iron_control::configured_slack_search_epoch(),
             warm_pool: None,
             personas: None,
             session_title_generator: None,
@@ -1819,6 +1822,9 @@ impl SessionRuntime {
                         .await?
                 }
             };
+            let _slack_policy_lock = self
+                .lock_enrolled_slack_session(thread_key, &registered_principal)
+                .await?;
             let desired_capabilities = sandbox_capabilities_from_principal(&registered_principal);
             // A session's persona is fixed by the first successful create.
             // Use the stored persona before the requested one so later persona
@@ -1875,6 +1881,7 @@ impl SessionRuntime {
                 .store
                 .bind_iron_control_principal(thread_key, &registered_principal.id)
                 .await?;
+            let session = self.prepare_slack_search_epoch(thread_key, session).await?;
             let unavailable_requested_persona_id = persona_resolution
                 .unavailable_requested_persona_id
                 .filter(|_| {
@@ -2279,7 +2286,7 @@ impl SessionRuntime {
     async fn execute_session_impl(
         &self,
         thread_key: &ThreadKey,
-        input: ExecuteSessionInput,
+        mut input: ExecuteSessionInput,
         persisted_execution_id: Option<&str>,
         // Present only for an immediately dispatched tool-host call. Durable
         // recovery passes None and resolves the principal's current policy.
@@ -2294,6 +2301,19 @@ impl SessionRuntime {
                 correlation_sandbox_id,
                 SessionRuntimeError::ShuttingDown,
             ));
+        }
+        let _slack_policy_lock =
+            self.lock_slack_search_execution(thread_key)
+                .await
+                .map_err(|source| {
+                    SessionExecutionAttemptError::new(
+                        execution_id.clone(),
+                        correlation_sandbox_id.clone(),
+                        source,
+                    )
+                })?;
+        if persisted_execution_id.is_none() {
+            self.stamp_slack_execution_epoch(thread_key, &mut input);
         }
         let persisted_request = persisted_execution_id
             .is_none()
@@ -2345,6 +2365,12 @@ impl SessionRuntime {
             let requester_metadata = metadata.clone();
 
             let claim = if let Some(execution_id) = persisted_execution_id {
+                let request = self.store.execution_request(execution_id).await?;
+                if let Some(epoch) = self.slack_epoch_for_thread(thread_key)
+                    && request.get("metadata").and_then(|metadata| metadata.get(centaur_iron_control::SLACK_SEARCH_EPOCH_LABEL)).and_then(Value::as_str) != Some(epoch)
+                {
+                    return Err(SessionRuntimeError::BadRequest("slack_search_pre_epoch_execution_denied".to_owned()));
+                }
                 span.record("centaur.execution_id", execution_id);
                 span.record("execution_id", execution_id);
                 self.store.mark_execution_running(execution_id).await?
@@ -2375,6 +2401,7 @@ impl SessionRuntime {
                     );
                     return Ok(execution.execution);
                 }
+                self.validate_slack_execution_epoch(thread_key, &execution.execution)?;
                 self.store
                     .mark_execution_running(&execution.execution.execution_id)
                     .await?
@@ -2589,12 +2616,17 @@ impl SessionRuntime {
     pub async fn enqueue_session_execution(
         &self,
         thread_key: &ThreadKey,
-        input: ExecuteSessionInput,
+        mut input: ExecuteSessionInput,
     ) -> Result<SessionExecution, SessionRuntimeError> {
         let _admission = self.execution_admission.read().await;
         if self.shutting_down.load(Ordering::SeqCst) {
             return Err(SessionRuntimeError::ShuttingDown);
         }
+        // HTTP admission is durable before the background driver runs. Bind
+        // both persisted representations to the trusted epoch under the same
+        // lock used by direct execution and session retirement.
+        let _slack_policy_lock = self.lock_slack_search_execution(thread_key).await?;
+        self.stamp_slack_execution_epoch(thread_key, &mut input);
         self.store.get_session(thread_key).await?;
         validate_input_lines(&input.input_lines)?;
         let _ = duration_options(input.idle_timeout_ms, input.max_duration_ms)?;
@@ -2613,6 +2645,8 @@ impl SessionRuntime {
                 request,
             )
             .await?;
+        // An idempotency hit must not relabel or schedule a retired request.
+        self.validate_slack_execution_epoch(thread_key, &execution.execution)?;
 
         if execution.execution.status == ExecutionStatus::Queued {
             let persisted_input = if execution.created {
@@ -2799,6 +2833,27 @@ impl SessionRuntime {
         }) else {
             return;
         };
+
+        // Appends can steer an existing harness without normal execute
+        // admission. Keep the rollout lock through delivery so an epoch reset
+        // cannot race this alternate input path.
+        let _slack_policy_lock = match self.lock_slack_search_execution(thread_key).await {
+            Ok(lock) => lock,
+            Err(error) => {
+                self.record_steering_failure(
+                    thread_key,
+                    &execution.execution_id,
+                    error.to_string(),
+                )
+                .await;
+                return;
+            }
+        };
+        if let Err(error) = self.validate_slack_execution_epoch(thread_key, &execution) {
+            self.record_steering_failure(thread_key, &execution.execution_id, error.to_string())
+                .await;
+            return;
+        }
 
         // Steering joins the active execution's trace so harness spans for the
         // steered turn stay in the same tree.
@@ -3004,6 +3059,12 @@ impl SessionRuntime {
             );
             let session = self.store.get_session(thread_key).await?;
             if let Some(sandbox_id) = session.sandbox_id.as_deref() {
+                // Opening an event stream may reattach a live harness. It
+                // must obey the same enrollment and epoch barrier as execute.
+                let _slack_policy_lock = self.lock_slack_search_execution(thread_key).await?;
+                if let Some(active) = self.store.active_execution_for_thread(thread_key).await? {
+                    self.validate_slack_execution_epoch(thread_key, &active)?;
+                }
                 self.ensure_session_pipe_if_live(thread_key, sandbox_id)
                     .await?;
             }
@@ -3856,6 +3917,23 @@ impl SessionRuntime {
     ) -> Result<OrphanAdoption, SessionRuntimeError> {
         let thread_key = &execution.thread_key;
         let execution_id = execution.execution_id.as_str();
+        // Recovery can attach a running sandbox or schedule a queued request
+        // without going through the public execute endpoint first. Retire
+        // denied legacy executions before reading their recorded output.
+        let _slack_policy_lock = match self.lock_slack_search_execution(thread_key).await {
+            Ok(lock) => lock,
+            Err(error @ SessionRuntimeError::BadRequest(_)) => {
+                self.fail_orphaned_execution(thread_key, execution_id, "", &error.to_string())
+                    .await;
+                return Ok(OrphanAdoption::Failed);
+            }
+            Err(error) => return Err(error),
+        };
+        if let Err(error) = self.validate_slack_execution_epoch(thread_key, execution) {
+            self.fail_orphaned_execution(thread_key, execution_id, "", &error.to_string())
+                .await;
+            return Ok(OrphanAdoption::Failed);
+        }
         if execution.status == ExecutionStatus::Queued {
             // mark_execution_running is an atomic claim, so a periodic scan
             // can safely race the accepting process without double delivery.
@@ -9270,6 +9348,9 @@ mod tests {
 /// silently otherwise, mirroring `ABSURD_TEST_DATABASE_URL` in absurd-sdk).
 #[cfg(test)]
 mod adoption_tests {
+    mod slack_search_alternate;
+    mod slack_search_enqueue;
+
     use std::{
         collections::{BTreeMap, BTreeSet},
         sync::atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -9876,6 +9957,235 @@ mod adoption_tests {
         runtime_with(store, backend).with_personas(
             PersonaRegistry::new(definitions, None, vec!["/repo/tools".to_owned()]).unwrap(),
         )
+    }
+
+    #[derive(Clone)]
+    struct EpochRegistrar(Arc<AtomicBool>);
+
+    #[async_trait::async_trait]
+    impl SessionPrincipalRegistrar for EpochRegistrar {
+        async fn register_session(
+            &self,
+            _: &str,
+            _: Option<&Value>,
+        ) -> Result<Principal, IronControlError> {
+            self.get_principal("prn_test").await
+        }
+        async fn register_requester(
+            &self,
+            _: &str,
+            _: Option<&Value>,
+        ) -> Result<Option<Principal>, IronControlError> {
+            Ok(None)
+        }
+        async fn get_principal(&self, id: &str) -> Result<Principal, IronControlError> {
+            let mut principal = test_principal(id);
+            if self.0.load(Ordering::SeqCst) {
+                principal.labels.insert(
+                    centaur_iron_control::SLACK_SEARCH_EPOCH_LABEL.to_owned(),
+                    "test-epoch".to_owned(),
+                );
+            }
+            Ok(principal)
+        }
+    }
+
+    fn epoch_input() -> ExecuteSessionInput {
+        ExecuteSessionInput {
+            idempotency_key: Some("new-turn".to_owned()),
+            metadata: Some(json!({})),
+            input_lines: vec![
+                r#"{"type":"user","message":{"role":"user","content":"new question"}}"#.to_owned(),
+            ],
+            idle_timeout_ms: None,
+            max_duration_ms: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn slack_search_epoch_retires_old_harness_once_and_rechecks_live_enrollment() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread = ThreadKey::parse(format!("slack:CEPOCH:{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread,
+                &HarnessType::Codex,
+                None,
+                json!({"centaur.slack_search_epoch":"test-epoch"}),
+                BTreeMap::new(),
+            )
+            .await
+            .unwrap();
+        store
+            .bind_iron_control_principal(&thread, "prn_test")
+            .await
+            .unwrap();
+        store
+            .update_sandbox_id(&thread, Some("old-epoch-sandbox"))
+            .await
+            .unwrap();
+        store
+            .update_harness_thread_id(&thread, Some("old-harness-memory"))
+            .await
+            .unwrap();
+        store
+            .append_messages(
+                &thread,
+                &[SessionMessageInput {
+                    client_message_id: Some("old-message".to_owned()),
+                    role: MessageRole::User,
+                    parts: vec![json!({"type":"text","text":"preserved-history-canary"})],
+                    metadata: json!({}),
+                }],
+            )
+            .await
+            .unwrap();
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let enrolled = Arc::new(AtomicBool::new(true));
+        let mut runtime = SessionRuntime::new(
+            store.clone(),
+            SandboxRuntime::backend(backend.clone(), SandboxSpec::new("mock")),
+            EpochRegistrar(enrolled.clone()),
+        );
+        runtime.slack_search_epoch = Some("test-epoch".to_owned());
+        for _ in 0..2 {
+            let result = runtime
+                .create_or_get_session(
+                    &thread,
+                    &HarnessType::Codex,
+                    None,
+                    None,
+                    HarnessConflictPolicy::Reject,
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.session.sandbox_id, None);
+            assert_eq!(result.session.harness_thread_id, None);
+        }
+        assert_eq!(backend.stopped(), vec!["old-epoch-sandbox"]);
+        assert_eq!(
+            store.slack_search_epoch(&thread).await.unwrap().as_deref(),
+            Some("test-epoch")
+        );
+        let messages: String =
+            sqlx::query_scalar("select parts::text from session_messages where thread_key = $1")
+                .bind(thread.as_str())
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert!(messages.contains("preserved-history-canary"));
+        enrolled.store(false, Ordering::SeqCst);
+        let error = runtime
+            .execute_session(&thread, epoch_input())
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("slack_search_enrollment_required")
+        );
+        assert_eq!(backend.opens(), 0);
+    }
+
+    #[tokio::test]
+    async fn slack_search_epoch_preserves_active_execution_and_denies_old_queued_replay() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread = ThreadKey::parse(format!("slack:CEPOCH:{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                BTreeMap::new(),
+            )
+            .await
+            .unwrap();
+        store
+            .bind_iron_control_principal(&thread, "prn_test")
+            .await
+            .unwrap();
+        store
+            .update_sandbox_id(&thread, Some("busy-old-sandbox"))
+            .await
+            .unwrap();
+        let queued = store
+            .create_execution_with_request(
+                &thread,
+                Some("old-turn"),
+                json!({}),
+                serde_json::to_value(epoch_input()).unwrap(),
+            )
+            .await
+            .unwrap()
+            .execution;
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let mut runtime = SessionRuntime::new(
+            store.clone(),
+            SandboxRuntime::backend(backend.clone(), SandboxSpec::new("mock")),
+            EpochRegistrar(Arc::new(AtomicBool::new(true))),
+        );
+        runtime.slack_search_epoch = Some("test-epoch".to_owned());
+        assert!(
+            runtime
+                .create_or_get_session(
+                    &thread,
+                    &HarnessType::Codex,
+                    None,
+                    None,
+                    HarnessConflictPolicy::Reject
+                )
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("requires_idle_session")
+        );
+        assert!(backend.stopped().is_empty());
+        assert_eq!(store.slack_search_epoch(&thread).await.unwrap(), None);
+        store
+            .complete_execution(&queued.execution_id)
+            .await
+            .unwrap();
+        runtime
+            .create_or_get_session(
+                &thread,
+                &HarnessType::Codex,
+                None,
+                None,
+                HarnessConflictPolicy::Reject,
+            )
+            .await
+            .unwrap();
+        let queued = store
+            .create_execution_with_request(
+                &thread,
+                Some("old-replay"),
+                json!({}),
+                serde_json::to_value(epoch_input()).unwrap(),
+            )
+            .await
+            .unwrap()
+            .execution;
+        let error = runtime
+            .drive_session_execution(&thread, &queued.execution_id, epoch_input())
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("slack_search_pre_epoch_execution_denied")
+        );
+        assert_eq!(backend.opens(), 0);
+        store
+            .complete_execution(&queued.execution_id)
+            .await
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

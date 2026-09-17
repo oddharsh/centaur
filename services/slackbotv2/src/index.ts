@@ -1,4 +1,3 @@
-import { AsyncLocalStorage } from 'node:async_hooks'
 import { Buffer } from 'node:buffer'
 import { randomUUID } from 'node:crypto'
 import { Hono, type Context } from 'hono'
@@ -15,6 +14,8 @@ import {
   type Thread
 } from 'chat'
 import { createSlackAdapter } from '@chat-adapter/slack'
+import { slackCredentialSafeVerifier, withoutSlackActionTokens } from './slack-credentials'
+import { captureSlackSearchCredential, requestContext, type SlackbotV2RequestContext } from './request-context'
 import {
   assertSlackOk,
   callSlackApi,
@@ -143,18 +144,12 @@ type SlackAssistantAdapter = {
 
 const MAX_SLACK_MESSAGE_ATTACHMENTS = 20
 
-type SlackbotV2RequestContext = {
-  waitUntil(promise: Promise<unknown>): void
-  actionError?: unknown
-}
-
 type StateConnectionStatus = {
   attempts: number
   connected: boolean
   lastError?: string
 }
 
-const requestContext = new AsyncLocalStorage<SlackbotV2RequestContext>()
 const RENDER_OBLIGATION_INDEX_KEY = 'slackbotv2:render:index'
 const RENDER_OBLIGATION_INDEX_MAX_LENGTH = 2000
 const RENDER_INDEX_TTL_MS = 30 * 24 * 60 * 60 * 1000
@@ -314,7 +309,12 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
     apiUrl: options.slackApiUrl,
     botToken: options.botToken,
     botUserId: options.botUserId,
-    signingSecret: options.signingSecret,
+    webhookVerifier: slackCredentialSafeVerifier(
+      options.signingSecret,
+      options.slackSearchEnabled
+        ? payload => captureSlackSearchCredential(payload, options.agentViewEnabled)
+        : undefined
+    ),
     streamSegmentMaxAgeMs: Number(process.env.SLACK_STREAM_SEGMENT_MAX_AGE_MS) || undefined,
     userName,
     logger
@@ -602,7 +602,7 @@ export function createSlackbotV2(options: SlackbotV2Options): SlackbotV2 {
           return new globalThis.Response('Workflow action could not be recorded. Please retry.', { status: 503 })
         }
       }
-      const lateFileTask = lateSlackFiles.repairFromWebhook(rawBody)
+      const lateFileTask = response.ok ? lateSlackFiles.repairFromWebhook(rawBody) : null
       if (lateFileTask) waitUntil(c, lateFileTask)
       outcome = response.ok ? 'success' : 'error'
       return new globalThis.Response(await response.text(), {
@@ -1182,6 +1182,7 @@ async function syncThreadMessageToSession(
     input.mode === 'execute' && state.activeExecution !== true && !executedMessageIds.has(message.id)
   const shouldRefreshThreadContext = shouldStartExecution && isSlackThreadReply(message)
   const shouldIncludeContext =
+    !input.options.slackSearchEnabled &&
     shouldStartExecution && (state.historyForwarded !== true || shouldRefreshThreadContext)
   const isDuplicateIncrementalMessage =
     messageIds.has(message.id) && !shouldStartExecution && !shouldIncludeContext
@@ -1425,6 +1426,9 @@ async function syncThreadMessageToSession(
   // The previous harness's conversation state dies with its sandbox on a
   // restart, so re-feed the Slack thread transcript with this turn.
   const handleSessionRestarted = async (): Promise<void> => {
+    // RTS keeps retrieved history outside durable agent context. A fresh
+    // harness must not re-import a transcript from before enrollment.
+    if (input.options.slackSearchEnabled) return
     let history = context
     let restartContextDegraded = contextDegraded
     if (!history) {
@@ -3071,8 +3075,8 @@ function createLateSlackFileRepair(
     },
 
     repairFromWebhook(rawBody: string): Promise<void> | null {
-      const payload = slackWebhookPayload(rawBody)
-      if (!payload) return null
+      const payload = withoutSlackActionTokens(slackWebhookPayload(rawBody))
+      if (!isJsonObject(payload)) return null
       const event = slackWebhookEvent(payload)
       if (!event || !isLateSlackFileEvent(event, options)) return null
       cleanup()
@@ -3463,7 +3467,7 @@ async function slackApiMessageFromSlack(
     id,
     isMention: id === currentMessage.id ? currentMessage.isMention === true : false,
     links: serializeMessageLinks(undefined, message),
-    raw: message,
+    raw: withoutSlackActionTokens(message),
     rawSlackAttachmentCount: displayText.rawAttachmentCount,
     rawSlackBlockCount: displayText.rawBlockCount,
     teamId:

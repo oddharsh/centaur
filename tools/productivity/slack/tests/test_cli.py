@@ -51,6 +51,59 @@ def test_react_is_discoverable() -> None:
     assert "reactions:write" in result.output
 
 
+def test_search_answer_prints_only_receipt(monkeypatch) -> None:
+    calls = []
+
+    def fake_search_answer(query, *, context_id):
+        calls.append((query, context_id))
+        # Even an accidental expansion of the client return value must not be
+        # copied into the CLI's durable output.
+        return {"ok": True, "text": "PRIVATE-SEARCH-CANARY"}
+
+    monkeypatch.setitem(
+        sys.modules, "slack.client", types.SimpleNamespace(search_answer=fake_search_answer)
+    )
+    result = CliRunner().invoke(
+        app,
+        ["search-answer", "What changed?", "--context", "ce0c0b33-b14e-4a95-9d33-a7e04236f947"],
+    )
+    assert result.exit_code == 0
+    assert calls == [("What changed?", "ce0c0b33-b14e-4a95-9d33-a7e04236f947")]
+    assert json.loads(result.output) == {"ok": True, "status": "accepted", "delivery": "ephemeral"}
+    assert "PRIVATE-SEARCH-CANARY" not in result.output
+
+
+def test_search_answer_prints_fixed_error(monkeypatch) -> None:
+    def fail_search_answer(*args, **kwargs):
+        raise RuntimeError("PRIVATE-SEARCH-CANARY")
+
+    monkeypatch.setitem(
+        sys.modules, "slack.client", types.SimpleNamespace(search_answer=fail_search_answer)
+    )
+    result = CliRunner().invoke(
+        app,
+        ["search-answer", "What changed?", "--context", "ce0c0b33-b14e-4a95-9d33-a7e04236f947"],
+    )
+    assert result.exit_code == 1
+    assert json.loads(result.output) == {"ok": False, "error": "slack_search_answer_failed"}
+    assert "PRIVATE-SEARCH-CANARY" not in result.output
+
+
+def test_search_answer_validates_context_without_echoing_it() -> None:
+    result = CliRunner().invoke(app, ["search-answer", "Question", "--context", "INVALID-CANARY"])
+    assert result.exit_code == 1
+    assert json.loads(result.output) == {"ok": False, "error": "slack_search_invalid_request"}
+    assert "INVALID-CANARY" not in result.output
+
+
+def test_search_answer_help_and_required_context() -> None:
+    help_result = CliRunner().invoke(app, ["search-answer", "--help"])
+    assert help_result.exit_code == 0
+    assert "requester-only" in help_result.output
+    assert "--context" in help_result.output
+    assert CliRunner().invoke(app, ["search-answer", "Question"]).exit_code == 2
+
+
 def test_channel_arg_is_id_accepts_channel_id_forms() -> None:
     assert _channel_arg_is_id("C0AJ07U8Z1N")
     assert _channel_arg_is_id("#C0AJ07U8Z1N")
