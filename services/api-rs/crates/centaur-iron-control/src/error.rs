@@ -5,6 +5,8 @@ use crate::principal::PrincipalDerivationError;
 /// Errors returned by the iron-control admin client.
 #[derive(Debug, Error)]
 pub enum IronControlError {
+    #[error("slack_search_enrollment_required")]
+    SlackSearchEnrollmentRequired,
     /// A session did not carry enough identity metadata to derive its
     /// canonical principal.
     #[error(transparent)]

@@ -417,6 +417,9 @@ fn collect_plugin_metadata(
 }
 
 fn candidate_tool_dirs(base_dir: &Path) -> Result<Vec<PathBuf>, ToolDiscoveryError> {
+    if base_dir.join("pyproject.toml").is_file() {
+        return Ok(vec![base_dir.to_path_buf()]);
+    }
     let mut candidates = Vec::new();
     let mut children = read_dirs_sorted(base_dir)?;
     children.retain(|path| is_visible_dir(path));
@@ -1575,6 +1578,47 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    #[test]
+    fn discovers_single_package_source_without_sibling_tools() {
+        let temp = temp_dir("api-rs-single-tool-source");
+        let package = temp.join("tools/productivity/slack");
+        write_tool(
+            &package,
+            r#"
+[project]
+name = "slack"
+[project.scripts]
+slack = "cli:app"
+[tool.centaur]
+secrets = [{type = "http", name = "SLACK_BOT_TOKEN", match_headers = ["Authorization"], hosts = ["slack.com"]}]
+"#,
+        );
+        write_tool(
+            &temp.join("tools/productivity/calendar"),
+            r#"
+[project]
+name = "calendar"
+[tool.centaur]
+secrets = [{type = "http", name = "UNSELECTED_TOKEN", match_headers = ["Authorization"], hosts = ["calendar.test"]}]
+"#,
+        );
+        let dirs = std::slice::from_ref(&package);
+        let catalog = discover_tool_catalog(dirs).unwrap();
+        assert_eq!(catalog.tools.len(), 1);
+        assert_eq!(catalog.tools[0].name, "slack");
+        assert_eq!(catalog.tools[0].project_dir, package);
+        let metadata = collect_plugin_metadata(dirs).unwrap();
+        assert_eq!(metadata.tools.len(), 1);
+        assert_eq!(metadata.tools[0].script_names, vec!["slack"]);
+        let fragment = discover_tool_proxy_fragment(dirs).unwrap();
+        assert_eq!(fragment.tool_count, 1);
+        assert_eq!(fragment.secret_count, 1);
+        let encoded = serde_json::to_string(&fragment.fragment).unwrap();
+        assert!(encoded.contains("SLACK_BOT_TOKEN"));
+        assert!(!encoded.contains("UNSELECTED_TOKEN"));
+        fs::remove_dir_all(temp).unwrap();
+    }
 
     #[test]
     fn resolves_tool_dirs_from_explicit_env_string() {
