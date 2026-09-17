@@ -39,6 +39,7 @@ const TEAM_ID = 'T000000001'
 const CHANNEL_ID = 'C000000001'
 /** How real Slack renders a streamed message whose stream broke or was never stopped. */
 const BROKEN_STREAM_TEXT = ':warning: Something went wrong'
+const SLACK_MARKDOWN_TEXT_MAX_CHARS = 12_000
 
 function contentTextWithHeading(
   content: Array<{ text?: string; type: string }>,
@@ -3476,7 +3477,7 @@ describe('slackbotv2', () => {
     await waitFor(() => codexApi.streamCount === 1)
 
     const draft = 'Draft answer from the live deltas.'
-    const finalAnswer = 'Final reconciled answer from the result.'
+    const finalAnswer = `**Final reconciled answer from the result.**\n${'@tester '.repeat(25)}${'x'.repeat(13_000)}`
     // Stream a plan + the draft answer (so the answer delta reaches Slack), then
     // seal the answer item with a DIFFERENT canonical text. The recomposed
     // answer no longer extends the already-streamed text, so the renderer
@@ -3517,9 +3518,19 @@ describe('slackbotv2', () => {
 
     const texts = await threadTexts(parent.ts)
     // The streamed message was replaced in place with the durable final answer...
-    expect(texts.filter(text => text.includes(finalAnswer))).toHaveLength(1)
+    expect(texts.filter(text => text.includes('Final reconciled answer from the result.'))).toHaveLength(1)
     // ...and the diverging live draft is gone (neither interleaved nor left behind).
     expect(texts.some(text => text.includes('Draft answer from the live deltas'))).toBe(false)
+    const replacementUpdate = slackApi.calls.find(call => call.method === 'chat.update')
+    expect(replacementUpdate).toBeDefined()
+    expect(replacementUpdate?.body.text).toBeUndefined()
+    expect(stringField(replacementUpdate?.body.markdown_text)).toStartWith(
+      '**Final reconciled answer from the result.**'
+    )
+    expect(stringField(replacementUpdate?.body.markdown_text).length).toBeLessThanOrEqual(
+      SLACK_MARKDOWN_TEXT_MAX_CHARS
+    )
+    expect(stringField(replacementUpdate?.body.markdown_text)).toContain('[truncated ')
   })
 
   it('reposts the durable final answer when the Slack stream expires mid-render', async () => {
@@ -3572,10 +3583,11 @@ describe('slackbotv2', () => {
         }
       })
     )
+    const finalAnswer = `**EXPIRED_STREAM_FALLBACK_VISIBLE**\n${'@tester '.repeat(25)}${'x'.repeat(13_000)}`
     codexApi.emitSessionEvent(key, 'session.execution_completed', {
       execution_id: 'exe-stream-expired',
       status: 'completed',
-      result_text: 'EXPIRED_STREAM_FALLBACK_VISIBLE'
+      result_text: finalAnswer
     })
 
     await Promise.all(waits)
@@ -3584,6 +3596,18 @@ describe('slackbotv2', () => {
       text.includes('EXPIRED_STREAM_FALLBACK_VISIBLE')
     )
     expect(visibleFinalReplies).toHaveLength(1)
+    const fallbackPost = slackApi.calls.find(call => call.method === 'chat.postMessage')
+    expect(fallbackPost).toBeDefined()
+    expect(fallbackPost?.body.text).toBeUndefined()
+    expect(stringField(fallbackPost?.body.markdown_text)).toStartWith(
+      '**EXPIRED_STREAM_FALLBACK_VISIBLE**'
+    )
+    // The fallback budget leaves room for the adapter to expand bare mentions
+    // without crossing Slack's 12,000-character markdown_text limit.
+    expect(stringField(fallbackPost?.body.markdown_text).length).toBeLessThanOrEqual(
+      SLACK_MARKDOWN_TEXT_MAX_CHARS
+    )
+    expect(stringField(fallbackPost?.body.markdown_text)).toContain('[truncated ')
     const threadState = await sharedState.get<Record<string, unknown>>(`thread-state:${key}`)
     expect(threadState).toEqual(
       expect.objectContaining({
@@ -6813,6 +6837,8 @@ type StreamCall = {
     | 'agents.sessions.rename'
     | 'assistant.threads.setStatus'
     | 'assistant.threads.setTitle'
+    | 'chat.postMessage'
+    | 'chat.update'
     | 'chat.startStream'
     | 'chat.appendStream'
     | 'chat.stopStream'
@@ -7109,6 +7135,30 @@ async function handlePatchedSlackRequest(
         : Response.json({ ok: true })
     )
     return
+  }
+  if (path === '/api/chat.postMessage' || path === '/api/chat.update') {
+    const body = await requestBody(request.clone())
+    if (typeof body.markdown_text === 'string') {
+      input.calls.push({
+        method: path === '/api/chat.postMessage' ? 'chat.postMessage' : 'chat.update',
+        body
+      })
+      if (body.markdown_text.length > SLACK_MARKDOWN_TEXT_MAX_CHARS) {
+        await sendWebResponse(res, Response.json({ ok: false, error: 'msg_too_long' }))
+        return
+      }
+      const { markdown_text: markdownText, ...legacyBody } = body
+      await sendWebResponse(
+        res,
+        Response.json(
+          await postSlack(input.upstreamUrl, request, path, {
+            ...legacyBody,
+            text: markdownText
+          })
+        )
+      )
+      return
+    }
   }
   if (path === '/api/chat.startStream') {
     await sendWebResponse(

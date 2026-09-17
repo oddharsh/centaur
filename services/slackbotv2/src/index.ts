@@ -162,6 +162,8 @@ const RENDER_RETRY_MAX_DELAY_MS = 5_000
 const ASSISTANT_STATUS_MAX_CHARS = 50
 const SLACK_TASK_DETAILS_MAX_CHARS = 256
 const SLACK_FALLBACK_TEXT_MAX_CHARS = 35_000
+// Leave room below Slack's 12,000-character limit for adapter mention and emoji expansion.
+const SLACK_FALLBACK_MARKDOWN_MAX_CHARS = 11_500
 const POSTGRES_CONNECT_INITIAL_DELAY_MS = 250
 const POSTGRES_CONNECT_MAX_DELAY_MS = 10_000
 const HANDOFF_RETRY_DELAYS_MS: readonly number[] = [5_000, 30_000, 120_000]
@@ -1990,7 +1992,7 @@ function slackStreamErrorCode(error: unknown): string {
 const FALLBACK_OPEN_MAX_ATTEMPTS = 4
 
 /**
- * Delivers the durable final answer as a plain thread post after the live
+ * Delivers the durable final answer as a CommonMark thread post after the live
  * Slack streaming render failed. Replays the session event stream from the
  * execution's starting position (the control plane keeps the events durably,
  * so the terminal result is replayable even when the failed render already
@@ -2051,11 +2053,19 @@ async function renderFallbackFinalAnswer(
       return null
     }
     const text = fallback.textOrDefault()
-    const fallbackText = truncateSlackText(text, SLACK_FALLBACK_TEXT_MAX_CHARS, 'Slack final answer')
+    const fallbackMarkdown = truncateSlackText(
+      text,
+      SLACK_FALLBACK_MARKDOWN_MAX_CHARS,
+      'Slack final answer'
+    )
     if (replacement) {
-      await thread.adapter.editMessage(thread.id, replacement.replaceMessageId, fallbackText)
+      await thread.adapter.editMessage(
+        thread.id,
+        replacement.replaceMessageId,
+        { markdown: fallbackMarkdown }
+      )
     } else {
-      await thread.post(fallbackText)
+      await thread.post({ markdown: fallbackMarkdown })
     }
     traceLog(options, 'slackbotv2_render_fallback_complete', trace, {
       chars: text.length,

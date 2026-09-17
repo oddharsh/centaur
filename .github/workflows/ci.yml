@@ -119,7 +119,7 @@ jobs:
 
   migration-order:
     name: Migration order
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04-16' || 'ubuntu-24.04' }}
     needs: ci_changes
     if: needs.ci_changes.outputs.migration_order == 'true'
     steps:
@@ -133,7 +133,7 @@ jobs:
 
   harness-server-checks:
     name: Harness server fmt, clippy, and tests
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04-16' || 'ubuntu-24.04' }}
     needs: ci_changes
     if: needs.ci_changes.outputs.harness_server_checks == 'true'
     steps:
@@ -164,7 +164,7 @@ jobs:
 
   rust-api:
     name: Rust API fmt, clippy, and tests
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04-16' || 'ubuntu-24.04' }}
     needs: ci_changes
     if: needs.ci_changes.outputs.rust_api == 'true'
     steps:
@@ -205,7 +205,12 @@ jobs:
         working-directory: services/api-rs
         env:
           SESSION_SQLX_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-        run: cargo test --workspace
+        run: |
+          cargo test --workspace
+
+          PGPASSWORD=postgres createdb --host localhost --username postgres session_runtime
+          SESSION_RUNTIME_TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/session_runtime \
+            cargo test -p centaur-session-runtime -- --test-threads=1
 
       - name: Run API integration test
         working-directory: services/api-rs
@@ -304,7 +309,7 @@ jobs:
           python-version: "3.11"
 
       # Tool-host integration tests execute real CLIs through uvx.
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
 
       - name: Sandbox Python tests
         env:
@@ -326,7 +331,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           enable-cache: true
           prune-cache: true
@@ -358,7 +363,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           enable-cache: true
           prune-cache: true
@@ -369,7 +374,7 @@ jobs:
 
   slackbotv2-tests:
     name: Slackbot v2 tests
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04-16' || 'ubuntu-24.04' }}
     needs: ci_changes
     if: needs.ci_changes.outputs.slackbotv2_tests == 'true'
     steps:
@@ -381,7 +386,7 @@ jobs:
         with:
           node-version: "24"
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.28.1
           run_install: false
@@ -407,7 +412,7 @@ jobs:
         with:
           node-version: "24"
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.28.1
           run_install: false
@@ -427,7 +432,7 @@ jobs:
 
   discordbot-checks:
     name: Discordbot typecheck and tests
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04-16' || 'ubuntu-24.04' }}
     needs: ci_changes
     if: needs.ci_changes.outputs.discordbot_checks == 'true'
     steps:
@@ -439,7 +444,7 @@ jobs:
         with:
           node-version: "24"
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.28.1
           run_install: false
@@ -461,7 +466,7 @@ jobs:
 
   githubbot-checks:
     name: Githubbot typecheck and tests
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04-16' || 'ubuntu-24.04' }}
     needs: ci_changes
     if: needs.ci_changes.outputs.githubbot_checks == 'true'
     steps:
@@ -473,7 +478,7 @@ jobs:
         with:
           node-version: "24"
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.28.1
           run_install: false
@@ -495,7 +500,7 @@ jobs:
 
   teamsbot-checks:
     name: Teamsbot typecheck and tests
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04-16' || 'ubuntu-24.04' }}
     needs: ci_changes
     if: needs.ci_changes.outputs.teamsbot_checks == 'true'
     steps:
@@ -507,7 +512,7 @@ jobs:
         with:
           node-version: "24"
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.28.1
           run_install: false
