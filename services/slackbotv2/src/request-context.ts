@@ -10,11 +10,19 @@ type SlackSearchCredential = {
   userId: string
 }
 
+/**
+ * Why this request carries no search credential, when the event was a human
+ * turn the bot would otherwise search for. Surfaced to the agent so its
+ * unavailable notice can say whether retrying could ever help.
+ */
+export type SlackSearchCaptureFailure = 'group_dm' | 'missing_action_token'
+
 export type SlackbotV2RequestContext = {
   waitUntil(promise: Promise<unknown>): void
   actionError?: unknown
   /** Verified request-local credential. Never copy this into message or recovery state. */
   slackSearchCredential?: SlackSearchCredential
+  slackSearchCaptureFailure?: SlackSearchCaptureFailure
 }
 
 export const requestContext = new AsyncLocalStorage<SlackbotV2RequestContext>()
@@ -26,8 +34,20 @@ export function captureSlackSearchCredential(payload: unknown, agentViewEnabled 
   const event = payload.event
   if (!record(event) || !['app_mention', 'message'].includes(String(event.type))) return
   if (event.bot_id || (event.subtype && event.subtype !== 'file_share')) return
-  if (event.channel_type === 'mpim') return
+  // Group DMs are excluded as search origins by design (RFC 0006). Record
+  // that so the turn's notice can say so instead of asking for a retry.
+  if (event.channel_type === 'mpim') {
+    context.slackSearchCaptureFailure = 'group_dm'
+    return
+  }
   const actionToken = text(event.action_token) ?? text(payload.action_token)
+  // Slack attaches the token only when the app install carries the search
+  // scope. Its absence on an otherwise ordinary human turn is a workspace
+  // configuration signal, not something a retry fixes.
+  if (!actionToken) {
+    context.slackSearchCaptureFailure = 'missing_action_token'
+    return
+  }
   const channelId = text(event.channel)
   const messageId = text(event.ts)
   const isDirectMessage = event.channel_type === 'im' && channelId?.startsWith('D') === true
@@ -36,7 +56,7 @@ export function captureSlackSearchCredential(payload: unknown, agentViewEnabled 
   const threadTs = text(event.thread_ts) ?? (isDirectMessage && !agentViewEnabled ? '' : messageId)
   const teamId = text(payload.team_id)
   const userId = text(event.user)
-  if (!actionToken || !channelId || !/^[CGD][A-Z0-9]+$/.test(channelId)
+  if (!channelId || !/^[CGD][A-Z0-9]+$/.test(channelId)
     || (channelId.startsWith('D') && !isDirectMessage)
     || (event.channel_type === 'im' && !isDirectMessage)
     || !messageId || !/^\d+\.\d+$/.test(messageId)
@@ -60,6 +80,11 @@ export function takeSlackSearchCredential(
     || credential.messageId !== messageId || credential.userId !== userId) return undefined
   delete context!.slackSearchCredential
   return credential
+}
+
+/** Why the current event yielded no credential, when capture recorded a reason. */
+export function slackSearchCaptureFailure(): SlackSearchCaptureFailure | undefined {
+  return requestContext.getStore()?.slackSearchCaptureFailure
 }
 
 function record(value: unknown): value is Record<string, unknown> {
