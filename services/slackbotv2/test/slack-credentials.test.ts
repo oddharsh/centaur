@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { Message, parseMarkdown } from 'chat'
 import { slackCredentialSafeVerifier, withoutSlackActionTokens } from '../src/slack-credentials'
 import { serializeMessage } from '../src/session-api'
-import { captureSlackSearchCredential, requestContext, takeSlackSearchCredential } from '../src/request-context'
+import { captureSlackSearchCredential, requestContext, slackSearchCaptureFailure, takeSlackSearchCredential, type SlackSearchCaptureFailure } from '../src/request-context'
 
 const SIGNING_SECRET = 'synthetic-signing-secret'
 const ACTION_TOKEN = 'synthetic-action-token-canary'
@@ -55,6 +55,32 @@ describe('Slack action token hygiene', () => {
         expect(requestContext.getStore()?.slackSearchCredential).toBeUndefined()
       })
     }
+  })
+
+  test('records why a human turn yielded no credential, and only then', async () => {
+    const base = { type: 'event_callback', team_id: 'T1', action_token: ACTION_TOKEN }
+    const human = { type: 'app_mention', channel: 'C1', user: 'U1', ts: '123.456' }
+    const good = { ...base, event: human }
+    const cases: Array<[unknown, SlackSearchCaptureFailure | undefined]> = [
+      // Group DMs are excluded as origins regardless of the id prefix Slack uses.
+      [{ ...base, event: { ...human, channel: 'G1', channel_type: 'mpim' } }, 'group_dm'],
+      [{ ...base, event: { ...human, channel: 'C1', channel_type: 'mpim' } }, 'group_dm'],
+      [{ type: 'event_callback', team_id: 'T1', event: { ...human } }, 'missing_action_token'],
+      // Not human turns: no reason, no credential.
+      [{ type: 'event_callback', team_id: 'T1', event: { ...human, bot_id: 'B1' } }, undefined],
+      [{ type: 'event_callback', team_id: 'T1', event: { ...human, subtype: 'message_changed' } }, undefined],
+      [{ ...base, event: { ...human, channel_type: 'mpim', bot_id: 'B1' } }, undefined],
+      // A good capture leaves no reason behind.
+      [good, undefined]
+    ]
+    for (const [payload, reason] of cases) {
+      await requestContext.run({ waitUntil: () => undefined }, async () => {
+        captureSlackSearchCredential(payload)
+        expect(slackSearchCaptureFailure()).toBe(reason)
+        expect(requestContext.getStore()?.slackSearchCredential !== undefined).toBe(payload === good)
+      })
+    }
+    expect(slackSearchCaptureFailure()).toBeUndefined()
   })
 
   test('captures verified DM requests with canonical root and reply bindings', async () => {
