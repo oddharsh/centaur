@@ -4,7 +4,7 @@ import { isRetryableCodexErrorNotification } from '@centaur/rendering'
 import type { Attachment, LinkPreview, Message } from 'chat'
 import { renderSlackDisplayText, slackMessagePromptText } from './slack-display-text'
 import { withoutSlackActionTokens } from './slack-credentials'
-import { takeSlackSearchCredential } from './request-context'
+import { slackSearchCaptureFailure, takeSlackSearchCredential } from './request-context'
 import type {
   ForwardSessionInput,
   JsonObject,
@@ -1416,11 +1416,14 @@ async function executeSession(
 ): Promise<SlackbotV2ExecuteSessionResponse> {
   const fetchFn = options.fetch ?? fetch
   const requesterIdentity = await resolveRequesterIdentity(options, message)
-  const searchContextId = await registerSlackSearchContext(options, threadId, message)
-  const searchPreamble = options.slackSearchEnabled
-    ? searchContextId
-      ? `Slack search is available for this turn. For Slack questions, use \`slack search-answer --context ${searchContextId} QUESTION\`. It searches authorized channels and sends a temporary answer visible only to the requester in this Slack conversation. The tool returns a delivery receipt, not the answer or retrieved messages. Do not repeat or reconstruct the answer in the shared reply. Do not use legacy Slack search or another retrieval route if this tool fails.`
-      : 'Slack search is unavailable for this turn because no verified search context could be registered. If the request needs Slack search, explain that it is unavailable and ask the requester to mention the bot again. Do not fall back to legacy Slack search or another retrieval route.'
+  const searchRegistration = options.slackSearchEnabled
+    ? await registerSlackSearchContext(options, threadId, message)
+    : undefined
+  const searchContextId = searchRegistration?.contextId
+  const searchPreamble = searchRegistration
+    ? searchRegistration.contextId !== undefined
+      ? `Slack search is available for this turn. For Slack questions, use \`slack search-answer --context ${searchRegistration.contextId} QUESTION\`. It searches authorized channels and sends a temporary answer visible only to the requester in this Slack conversation. The tool returns a delivery receipt, not the answer or retrieved messages. Do not repeat or reconstruct the answer in the shared reply. Do not use legacy Slack search or another retrieval route if this tool fails.`
+      : slackSearchUnavailablePreamble(searchRegistration.reason)
     : undefined
   const executionPreamble = [contextPreamble, searchPreamble].filter(Boolean).join('\n\n') || undefined
   const idleTimeoutMs = sessionIdleTimeoutMs(options)
@@ -1474,14 +1477,44 @@ async function executeSession(
   return (await response.json()) as SlackbotV2ExecuteSessionResponse
 }
 
+type SlackSearchUnavailableReason =
+  | 'group_dm'
+  | 'missing_action_token'
+  | 'no_credential'
+  | 'registration_failed'
+
+type SlackSearchRegistration =
+  | { contextId: string; reason?: undefined }
+  | { contextId?: undefined; reason: SlackSearchUnavailableReason }
+
+const SLACK_SEARCH_NO_FALLBACK = 'Do not fall back to legacy Slack search or another retrieval route.'
+
+// Each notice tells the agent whether a retry can ever help, so it does not
+// send a requester in a group DM around a loop of re-mentions.
+function slackSearchUnavailablePreamble(reason: SlackSearchUnavailableReason): string {
+  switch (reason) {
+    case 'group_dm':
+      return `Slack search is unavailable in group DMs; it works from channels the bot is in and from a direct message with the bot. If the request needs Slack search, say that it is unavailable here and suggest asking in a channel or a direct message. Mentioning the bot again in this conversation will not enable it. ${SLACK_SEARCH_NO_FALLBACK}`
+    case 'missing_action_token':
+      return `Slack search is unavailable for this turn because Slack did not attach a search capability to this mention, which usually means the Slack app installation in this workspace lacks the search scope. If the request needs Slack search, say that it is unavailable and that a workspace admin needs to check the bot's Slack app configuration. Mentioning the bot again will not help until that changes. ${SLACK_SEARCH_NO_FALLBACK}`
+    case 'no_credential':
+    case 'registration_failed':
+      return `Slack search is unavailable for this turn because no verified search context could be registered. If the request needs Slack search, explain that it is unavailable and ask the requester to mention the bot again. ${SLACK_SEARCH_NO_FALLBACK}`
+  }
+}
+
 async function registerSlackSearchContext(
   options: SlackbotV2Options,
   threadId: string,
   message: SlackbotV2ApiMessage
-): Promise<string | undefined> {
-  if (!options.slackSearchEnabled || message.author.isMe || message.author.isBot) return undefined
+): Promise<SlackSearchRegistration> {
+  const unavailable = (reason: SlackSearchUnavailableReason): SlackSearchRegistration => {
+    options.logger?.warn('slackbotv2_slack_search_unavailable', { reason })
+    return { reason }
+  }
+  if (message.author.isMe || message.author.isBot) return { reason: 'no_credential' }
   const credential = takeSlackSearchCredential(threadId, message.id, message.author.userId)
-  if (!credential) return undefined
+  if (!credential) return unavailable(slackSearchCaptureFailure() ?? 'no_credential')
   const controller = new AbortController()
   try {
     return await withTimeout('register Slack search context', slackApiTimeoutMs(options), async () => {
@@ -1509,7 +1542,7 @@ async function registerSlackSearchContext(
       const payload: unknown = await response.json()
       if (isJsonObject(payload) && payload.ok === true && typeof payload.context_id === 'string'
         && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(payload.context_id)) {
-        return payload.context_id
+        return { contextId: payload.context_id }
       }
       throw new Error('registration_failed')
     })
@@ -1518,8 +1551,7 @@ async function registerSlackSearchContext(
   } finally {
     controller.abort()
   }
-  options.logger?.warn('slackbotv2_slack_search_unavailable', { reason: 'registration_failed' })
-  return undefined
+  return unavailable('registration_failed')
 }
 
 async function postInterruptSessionExecution(

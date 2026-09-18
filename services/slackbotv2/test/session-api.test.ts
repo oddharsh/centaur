@@ -192,6 +192,44 @@ describe('Slack search context handoff', () => {
     expect(api.requests.some(request => request.url.endsWith('/api/slack/search-context'))).toBe(false)
   })
 
+  for (const [origin, reason, event] of [
+    ['a group DM', 'group_dm', { type: 'app_mention', channel: 'C1', channel_type: 'mpim', user: 'U1' }],
+    ['a mention without a Slack action token', 'missing_action_token', { type: 'app_mention', channel: 'C1', user: 'U1' }]
+  ] as const) {
+    test(`tells the agent a retry cannot help from ${origin}`, async () => {
+      const api = fakeApi()
+      const logs: unknown[] = []
+      const canary = 'synthetic-origin-token-canary'
+      const message = apiMessage('search Slack')
+      const logger = {
+        debug: (...args: unknown[]) => { logs.push(args) },
+        info: (...args: unknown[]) => { logs.push(args) },
+        warn: (...args: unknown[]) => { logs.push(args) },
+        error: (...args: unknown[]) => { logs.push(args) },
+        child() { return this }
+      }
+      await requestContext.run({ waitUntil: () => undefined }, async () => {
+        captureSlackSearchCredential({
+          type: 'event_callback', team_id: 'T1',
+          ...(reason === 'group_dm' ? { action_token: canary } : {}),
+          event: { ...event, ts: message.id }
+        })
+        await forwardToSessionApi({ ...options(api.fetchFn), slackSearchEnabled: true, logger }, forwardInput(message))
+      })
+      expect(api.requests.some(request => request.url.endsWith('/api/slack/search-context'))).toBe(false)
+      expect(api.requests.filter(request => request.url.endsWith('/execute'))).toHaveLength(1)
+      const body = JSON.stringify(executeBody(api.requests))
+      expect(body).toContain('Slack search is unavailable')
+      expect(body).toContain('Do not fall back to legacy Slack search')
+      expect(body).not.toContain('mention the bot again')
+      if (reason === 'group_dm') expect(body).toContain('unavailable in group DMs')
+      if (reason === 'missing_action_token') expect(body).toContain('did not attach a search capability')
+      expect(executeBody(api.requests).metadata).not.toHaveProperty('slack_search_context_id')
+      expect(JSON.stringify({ requests: api.requests, logs })).not.toContain(canary)
+      expect(logs).toContainEqual(['slackbotv2_slack_search_unavailable', { reason }])
+    })
+  }
+
   for (const failure of ['status', 'json', 'context_id', 'exception', 'timeout'] as const) {
     test(`preserves normal execution with a safe unavailable notice on registration ${failure}`, async () => {
       const api = fakeApi()
