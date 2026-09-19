@@ -1,0 +1,30 @@
+name: Personal Telegram CI
+on:
+  pull_request:
+    paths: ['services/telegram/**', 'contrib/chart/**', '.github/workflows/telegram-ci.yml']
+  push:
+    branches: [main]
+    paths: ['services/telegram/**', 'contrib/chart/**', '.github/workflows/telegram-ci.yml']
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.1.1
+      - run: helm repo add onepassword https://1password.github.io/connect-helm-charts
+      - run: helm dependency build contrib/chart
+      - run: pip install uv==0.9.9
+      - run: uv sync --frozen
+        working-directory: services/telegram
+      - run: uv run pytest && uv run ruff check . && uv run ruff format --check .
+        working-directory: services/telegram
+      - run: docker build -t centaur-telegram:test services/telegram
