@@ -26,12 +26,23 @@ class Principal < ApplicationRecord
   after_create_commit :enqueue_slack_channel_catalog_refresh, if: :slack_channel_catalog_refreshable?
   after_create :assign_default_roles, if: :roles_blank_for_defaulting?
   before_validation :apply_sandbox_repo_cache_label
+  before_validation :enroll_in_slack_search_epoch, on: :create, if: :slack_search_enrollment_requested?
+  validate :slack_search_epoch_role_resolved, on: :create, if: :slack_search_enrollment_requested?
   before_commit :bump_own_sync_config_cache_version, on: :update, if: :sync_config_fields_changed?
 
   URL_SAFE_FORMAT = /\A[A-Za-z0-9\-._~]+\z/
   URL_SAFE_MESSAGE = "must contain only URL-safe characters (A-Z, a-z, 0-9, -, ., _, ~)"
   SANDBOX_REPO_CACHE_LABEL = "centaur.sandbox_repo_cache".freeze
   TOOL_LABEL = "centaur-tool".freeze
+  SLACK_SEARCH_EPOCH_LABEL = "centaur.slack_search_epoch".freeze
+  SLACK_SEARCH_KINDS = %w[slack_channel slack_dm].freeze
+  # The posture every Slack search enrollee gets, matching the reviewed cohort.
+  SLACK_SEARCH_CAPABILITY_FLAGS = {
+    sandbox_sessions_read_enabled: false,
+    sandbox_observability_enabled: false,
+    sandbox_workflows_read_enabled: false,
+    sandbox_workflows_write_enabled: false
+  }.freeze
   SANDBOX_REPO_CACHE_VALUES = %w[none public all].freeze
   UNKNOWN_KIND = "unknown".freeze
   KINDS = %w[
@@ -283,6 +294,37 @@ class Principal < ApplicationRecord
 
   def roles_blank_for_defaulting?
     association(:roles).target.empty? && !roles.exists?
+  end
+
+  # api-rs creates Slack channels and users it has never seen with the Slack
+  # search epoch label already set. Such a principal must start on that
+  # epoch's isolated role, never the broad default role, so the role is
+  # attached in memory before insert and assign_default_roles then skips it.
+  # Explicitly assigned roles are left alone.
+  def slack_search_enrollment_requested?
+    SLACK_SEARCH_KINDS.include?(kind) && labels.to_h[SLACK_SEARCH_EPOCH_LABEL].present? &&
+      association(:roles).target.empty?
+  end
+
+  def slack_search_epoch_roles
+    @slack_search_epoch_roles ||= Role.where(assign_by_default: false)
+                                      .where("labels ->> ? = ?", SLACK_SEARCH_EPOCH_LABEL, labels.to_h[SLACK_SEARCH_EPOCH_LABEL])
+                                      .to_a
+  end
+
+  def enroll_in_slack_search_epoch
+    return unless slack_search_epoch_roles.one?
+
+    self.roles = slack_search_epoch_roles
+    assign_attributes(SLACK_SEARCH_CAPABILITY_FLAGS)
+  end
+
+  # Fail closed: without exactly one isolated role for the epoch, refuse to
+  # create the principal rather than let it fall through to the defaults.
+  def slack_search_epoch_role_resolved
+    return if slack_search_epoch_roles.one?
+
+    errors.add(:labels, "#{SLACK_SEARCH_EPOCH_LABEL} does not match exactly one non-default role")
   end
 
   def assign_default_roles
