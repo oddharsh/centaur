@@ -15,8 +15,9 @@ use crate::IronControlClient;
 use crate::error::{IronControlError, Result};
 use crate::models::{Principal, PrincipalInput, SlackChannelPermissionInput};
 use crate::principal::{
-    PrincipalRef, derive_github_requester_principal, derive_principal_with_slack_team,
-    derive_slack_requester_principal, is_direct_message, slack_conversation_id,
+    PrincipalRef, SLACK_CHANNEL_KIND, SLACK_DM_KIND, derive_github_requester_principal,
+    derive_principal_with_slack_team, derive_slack_requester_principal, is_direct_message,
+    slack_conversation_id,
 };
 
 pub const SLACK_SEARCH_EPOCH_LABEL: &str = "centaur.slack_search_epoch";
@@ -26,6 +27,16 @@ pub fn configured_slack_search_epoch() -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+/// Whether Slack channels and users the API has never seen are created
+/// already enrolled in the configured epoch instead of being refused. The
+/// console attaches the epoch's isolated role in place of the default roles
+/// when it creates a principal carrying the label, so a new identity never
+/// holds the broad default role, even briefly.
+pub fn configured_slack_search_auto_enroll() -> bool {
+    std::env::var("SLACK_SEARCH_AUTO_ENROLL")
+        .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -67,6 +78,7 @@ impl<'a> SessionPrincipalMetadata<'a> {
 pub struct SessionRegistrar {
     client: IronControlClient,
     slack_search_epoch: Option<String>,
+    slack_search_auto_enroll: bool,
 }
 
 impl SessionRegistrar {
@@ -74,6 +86,7 @@ impl SessionRegistrar {
         Self {
             client,
             slack_search_epoch: configured_slack_search_epoch(),
+            slack_search_auto_enroll: configured_slack_search_auto_enroll(),
         }
     }
 
@@ -113,16 +126,8 @@ impl SessionRegistrar {
         let mut input = principal.to_principal_input();
         apply_slack_dm_email(thread_key, metadata.slack_user_email, &mut input);
         let existing = self.merge_existing_labels(&mut input).await?;
-        if thread_key.starts_with("slack:")
-            && self
-                .slack_search_epoch
-                .as_ref()
-                .is_some_and(|epoch| input.labels.get(SLACK_SEARCH_EPOCH_LABEL) != Some(epoch))
-        {
-            return Err(IronControlError::SlackSearchEnrollmentRequired);
-        }
-        let mut slack_permission =
-            session_slack_permission(thread_key, &input, existing.is_some());
+        self.admit_slack_search_principal(thread_key, &mut input, existing.is_some())?;
+        let mut slack_permission = session_slack_permission(thread_key, &input, existing.is_some());
         // Enrollment is sticky even while rollout is disabled. Re-registering
         // a DM must not silently restore its retired read capabilities.
         if input.labels.contains_key(SLACK_SEARCH_EPOCH_LABEL)
@@ -197,13 +202,7 @@ impl SessionRegistrar {
                 if existing.is_none() && !create_if_missing {
                     return Ok(None);
                 }
-                if thread_key.starts_with("slack:")
-                    && self.slack_search_epoch.as_ref().is_some_and(|epoch| {
-                        input.labels.get(SLACK_SEARCH_EPOCH_LABEL) != Some(epoch)
-                    })
-                {
-                    return Err(IronControlError::SlackSearchEnrollmentRequired);
-                }
+                self.admit_slack_search_principal(thread_key, &mut input, existing.is_some())?;
                 match principal_write(existing, create_if_missing) {
                     PrincipalWrite::UseExisting(principal) => Ok(Some(principal)),
                     PrincipalWrite::Upsert => {
@@ -217,6 +216,42 @@ impl SessionRegistrar {
 
     pub async fn get_principal(&self, principal: &str) -> Result<Principal> {
         self.client.get_principal(principal).await
+    }
+
+    /// The Slack search enrollment gate, run before any write. With an epoch
+    /// configured, a Slack principal must carry the matching label. When
+    /// auto-enroll is on, a Slack channel or user the console has never seen
+    /// is stamped with the label instead of refused, which makes the console
+    /// create it on the epoch's isolated role. A principal that already
+    /// exists without the label still fails closed: it may hold the broad
+    /// default role, and migrating it is an operator decision.
+    fn admit_slack_search_principal(
+        &self,
+        thread_key: &str,
+        input: &mut PrincipalInput,
+        exists: bool,
+    ) -> Result<()> {
+        let Some(epoch) = self
+            .slack_search_epoch
+            .as_ref()
+            .filter(|_| thread_key.starts_with("slack:"))
+        else {
+            return Ok(());
+        };
+        if input.labels.get(SLACK_SEARCH_EPOCH_LABEL) == Some(epoch) {
+            return Ok(());
+        }
+        let slack_kind = matches!(
+            input.kind.as_deref(),
+            Some(SLACK_CHANNEL_KIND | SLACK_DM_KIND)
+        );
+        if self.slack_search_auto_enroll && !exists && slack_kind {
+            input
+                .labels
+                .insert(SLACK_SEARCH_EPOCH_LABEL.to_owned(), epoch.clone());
+            return Ok(());
+        }
+        Err(IronControlError::SlackSearchEnrollmentRequired)
     }
 
     /// Fold an existing principal's labels under the freshly derived ones so
@@ -822,25 +857,6 @@ mod tests {
 
     #[tokio::test]
     async fn slack_search_enrollment_blocks_new_and_unmarked_principals_before_upsert() {
-        fn unmarked(method: &str, path: &str) -> (&'static str, String) {
-            match (method, path) {
-                ("GET", "/api/v1/principals/lookup/slack-channel-t123-c123") => principal(
-                    "prn_channel",
-                    "slack-channel-t123-c123",
-                    json!({"managed-by": "centaur"}),
-                ),
-                ("GET", "/api/v1/principals/lookup/slack-user-t123-u123") => principal(
-                    "prn_user",
-                    "slack-user-t123-u123",
-                    json!({"managed-by": "centaur"}),
-                ),
-                ("GET", _) => not_found(),
-                _ => (
-                    "500 Internal Server Error",
-                    r#"{"error":"unexpected"}"#.to_owned(),
-                ),
-            }
-        }
         fn missing(method: &str, _: &str) -> (&'static str, String) {
             match method {
                 "GET" => not_found(),
@@ -851,7 +867,7 @@ mod tests {
             }
         }
 
-        for respond in [missing as StubResponder, unmarked] {
+        for respond in [missing as StubResponder, unmarked_iron_control] {
             let (base_url, requests, server) = spawn_iron_control_stub(respond).await;
             let mut registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
             registrar.slack_search_epoch = Some("test-epoch".to_owned());
@@ -888,6 +904,142 @@ mod tests {
             );
             server.abort();
         }
+    }
+
+    fn recorded_body(requests: &[StubRequest], method: &str, path: &str) -> Value {
+        requests
+            .iter()
+            .find(|request| request.method == method && request.path == path)
+            .and_then(|request| request.body.clone())
+            .unwrap_or_else(|| panic!("no {method} {path} request with a body"))
+    }
+
+    /// iron-control with no Slack principals yet: lookups miss, creates and
+    /// permission writes succeed.
+    fn empty_iron_control(method: &str, path: &str) -> (&'static str, String) {
+        match (method, path) {
+            ("PUT", "/api/v1/principals/slack-channel-t123-c123") => {
+                principal("prn_channel", "slack-channel-t123-c123", json!({}))
+            }
+            ("PUT", "/api/v1/principals/slack-user-t123-u123") => {
+                principal("prn_user", "slack-user-t123-u123", json!({}))
+            }
+            ("POST", "/api/v1/principals/prn_channel/slack_channel_permissions") => {
+                ("200 OK", r#"{"data":{"ok":true}}"#.to_owned())
+            }
+            _ => not_found(),
+        }
+    }
+
+    /// iron-control where the channel and user exist without the epoch label.
+    fn unmarked_iron_control(method: &str, path: &str) -> (&'static str, String) {
+        match (method, path) {
+            ("GET", "/api/v1/principals/lookup/slack-channel-t123-c123") => principal(
+                "prn_channel",
+                "slack-channel-t123-c123",
+                json!({"managed-by": "centaur"}),
+            ),
+            ("GET", "/api/v1/principals/lookup/slack-user-t123-u123") => principal(
+                "prn_user",
+                "slack-user-t123-u123",
+                json!({"managed-by": "centaur"}),
+            ),
+            ("GET", _) => not_found(),
+            _ => (
+                "500 Internal Server Error",
+                r#"{"error":"unexpected"}"#.to_owned(),
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn slack_search_auto_enroll_labels_new_principals_before_create() {
+        let (base_url, requests, server) = spawn_iron_control_stub(empty_iron_control).await;
+        let mut registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
+        registrar.slack_search_epoch = Some("test-epoch".to_owned());
+        registrar.slack_search_auto_enroll = true;
+
+        registrar
+            .register_session(
+                "slack:T123:C123:1.0",
+                Some(&json!({"slack_team_id": "T123"})),
+            )
+            .await
+            .unwrap();
+        registrar
+            .register_requester(
+                "slack:T123:C123:1.0",
+                Some(&json!({
+                    "slack_team_id": "T123",
+                    "slack_home_team_id": "T123",
+                    "slack_user_id": "U123"
+                })),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        for path in [
+            "/api/v1/principals/slack-channel-t123-c123",
+            "/api/v1/principals/slack-user-t123-u123",
+        ] {
+            assert_eq!(
+                recorded_body(&requests, "PUT", path)["data"]["labels"][SLACK_SEARCH_EPOCH_LABEL],
+                "test-epoch",
+                "PUT {path} must create the principal already enrolled"
+            );
+        }
+        let permission = recorded_body(
+            &requests,
+            "POST",
+            "/api/v1/principals/prn_channel/slack_channel_permissions",
+        );
+        assert_eq!(permission["data"]["upload_enabled"], true);
+        assert_eq!(permission["data"]["download_enabled"], false);
+        assert_eq!(permission["data"]["history_enabled"], false);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn slack_search_auto_enroll_still_refuses_existing_unmarked_principals() {
+        let (base_url, requests, server) = spawn_iron_control_stub(unmarked_iron_control).await;
+        let mut registrar = SessionRegistrar::new(IronControlClient::new(base_url, "test-key"));
+        registrar.slack_search_epoch = Some("test-epoch".to_owned());
+        registrar.slack_search_auto_enroll = true;
+
+        let session = registrar
+            .register_session(
+                "slack:T123:C123:1.0",
+                Some(&json!({"slack_team_id": "T123"})),
+            )
+            .await;
+        assert!(matches!(
+            session,
+            Err(IronControlError::SlackSearchEnrollmentRequired)
+        ));
+        let requester = registrar
+            .register_requester(
+                "slack:T123:C123:1.0",
+                Some(&json!({
+                    "slack_team_id": "T123",
+                    "slack_home_team_id": "T123",
+                    "slack_user_id": "U123"
+                })),
+            )
+            .await;
+        assert!(matches!(
+            requester,
+            Err(IronControlError::SlackSearchEnrollmentRequired)
+        ));
+        assert!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|request| request.method == "GET")
+        );
+        server.abort();
     }
 
     #[tokio::test]
