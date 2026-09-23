@@ -487,6 +487,13 @@ apiRs:
   sandboxReadyTimeoutSecs: 90
   sandboxWarmPoolSize: 3
   sandboxWarmPoolReplenishIntervalSecs: 5
+  # Capabilities warm sandboxes boot with. A session claims a warm sandbox
+  # only when its principal resolves to exactly this profile; every other
+  # profile cold-starts. Match these to the principals most sessions run as,
+  # e.g. observability off when a role turns it off for the whole cohort.
+  sandboxWarmPoolObservabilityEnabled: true
+  # none | public | all
+  sandboxWarmPoolRepoCacheAccess: all
   # Capacity manager: when nonzero, api-rs keeps observed running-like
   # sandboxes at or below this limit by discarding ready warm sandboxes first,
   # then pausing least-recently-active idle session sandboxes. 0 disables.
