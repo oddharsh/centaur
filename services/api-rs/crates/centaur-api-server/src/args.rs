@@ -31,7 +31,7 @@ use centaur_sandbox_agent_k8s::{
 use centaur_sandbox_core::{Mount, MountKind, ResourceRequirements, SandboxSpec};
 use centaur_sandbox_local::LocalSandboxBackend;
 use centaur_sandbox_manager::{SandboxReaperConfig, WarmPoolConfig};
-use centaur_session_core::HarnessType;
+use centaur_session_core::{HarnessType, SandboxCapabilities, SandboxRepoCacheAccess};
 use centaur_session_runtime::{
     PersonaRegistry, SandboxCapacityConfig, SandboxWorkloadMode, SessionEventRetentionConfig,
     SessionPrincipalAdmission, SessionSandboxCleanupConfig,
@@ -724,6 +724,24 @@ struct SandboxArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     warm_pool_replenish_interval_secs: u64,
+    /// Observability capability warm sandboxes boot with. A session claims a
+    /// warm sandbox only when its principal resolves to exactly the warm
+    /// profile, so match this to the principals most sessions run as.
+    #[arg(
+        long = "session-sandbox-warm-pool-observability-enabled",
+        env = "SESSION_SANDBOX_WARM_POOL_OBSERVABILITY_ENABLED",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    warm_pool_observability_enabled: bool,
+    /// Repo cache access warm sandboxes boot with: `none`, `public`, or `all`.
+    #[arg(
+        long = "session-sandbox-warm-pool-repo-cache-access",
+        env = "SESSION_SANDBOX_WARM_POOL_REPO_CACHE_ACCESS",
+        default_value = "all",
+        value_parser = parse_sandbox_repo_cache_access
+    )]
+    warm_pool_repo_cache_access: SandboxRepoCacheAccess,
     /// Best-effort admission limit for sandboxes observed as running,
     /// excluding ready warm sandboxes. The
     /// limit rejects new creates and resumes but never evicts existing work.
@@ -970,7 +988,8 @@ impl SandboxArgs {
             SandboxBackendKind::Local => Ok(SandboxRuntime::backend_with_workload(
                 Arc::new(LocalSandboxBackend::new()),
                 self.local_workload_mode()?,
-            )),
+            )
+            .with_warm_capabilities(self.warm_pool_capabilities())),
             SandboxBackendKind::AgentK8s => {
                 let backend = Arc::new(AgentSandboxBackend::new(
                     self.kube_client().await?,
@@ -989,9 +1008,17 @@ impl SandboxArgs {
                         .with_artifact_reader(move |id, path, max_bytes| {
                             let backend = artifact_backend.clone();
                             async move { backend.read_artifact(&id, &path, max_bytes).await }
-                        }),
+                        })
+                        .with_warm_capabilities(self.warm_pool_capabilities()),
                 )
             }
+        }
+    }
+
+    fn warm_pool_capabilities(&self) -> SandboxCapabilities {
+        SandboxCapabilities {
+            repo_cache: self.warm_pool_repo_cache_access.clone(),
+            observability_enabled: self.warm_pool_observability_enabled,
         }
     }
 
@@ -2422,6 +2449,11 @@ fn parse_label_selector_arg(value: &str) -> Result<BTreeMap<String, String>, Str
     Ok(labels)
 }
 
+fn parse_sandbox_repo_cache_access(value: &str) -> Result<SandboxRepoCacheAccess, String> {
+    SandboxRepoCacheAccess::parse(value)
+        .ok_or_else(|| format!("repo cache access {value:?} must be none, public, or all"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2820,6 +2852,71 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn warm_pool_capabilities_default_to_the_default_profile() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--iron-control-url",
+            "http://console.local",
+            "--iron-control-proxy-sync-url",
+            "http://proxy-sync.local:8080",
+            "--iron-control-api-key",
+            "iak_test",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            args.sandbox.warm_pool_capabilities(),
+            SandboxCapabilities::default_enabled()
+        );
+    }
+
+    #[test]
+    fn warm_pool_capabilities_read_from_flags() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--iron-control-url",
+            "http://console.local",
+            "--iron-control-proxy-sync-url",
+            "http://proxy-sync.local:8080",
+            "--iron-control-api-key",
+            "iak_test",
+            "--session-sandbox-warm-pool-observability-enabled",
+            "false",
+            "--session-sandbox-warm-pool-repo-cache-access",
+            "public",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            args.sandbox.warm_pool_capabilities(),
+            SandboxCapabilities {
+                repo_cache: SandboxRepoCacheAccess::Public,
+                observability_enabled: false,
+            }
+        );
+        assert!(
+            Args::try_parse_from([
+                "centaur-api-server",
+                "--database-url",
+                "postgres://postgres:postgres@localhost/centaur",
+            "--iron-control-url",
+            "http://console.local",
+            "--iron-control-proxy-sync-url",
+            "http://proxy-sync.local:8080",
+            "--iron-control-api-key",
+            "iak_test",
+                "--session-sandbox-warm-pool-repo-cache-access",
+                "everything",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
