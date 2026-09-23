@@ -53,6 +53,16 @@ Set the same enrollment version on each migrated principal's
 or unenrolled Slack principals cannot start an agent execution. Enroll later
 principals through the same reviewed permission migration before use.
 
+Set `SLACK_SEARCH_AUTO_ENROLL: "true"` in `apiRs.extraEnv` to enroll new Slack
+channels, group DMs and users on first contact instead. The API creates a
+Slack principal it has never seen with the epoch label, and the console
+attaches the one non-default role labelled with the same epoch in place of the
+default roles, with sessions-read, observability and workflows off. The
+principal never holds a default role. If no single role matches, creation
+fails and the turn is refused. A principal that already exists without the
+label is still refused, since it may hold the default role; migrate those
+through the reviewed runner.
+
 The first use in a new epoch retires the previous sandbox and starts fresh
 harness state, while preserving stored session records. Slackbot does not
 backfill channel or DM history while search is enabled, including after a

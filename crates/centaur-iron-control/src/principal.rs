@@ -28,8 +28,8 @@ use thiserror::Error;
 use crate::models::PrincipalInput;
 use crate::util::{managed_labels, slugify};
 
-const SLACK_DM_KIND: &str = "slack_dm";
-const SLACK_CHANNEL_KIND: &str = "slack_channel";
+pub(crate) const SLACK_DM_KIND: &str = "slack_dm";
+pub(crate) const SLACK_CHANNEL_KIND: &str = "slack_channel";
 const DISCORD_CHANNEL_KIND: &str = "discord_channel";
 const GITHUB_USER_KIND: &str = "github_user";
 const GITHUB_THREAD_PREFIXES: &[&str] = &[

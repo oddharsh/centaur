@@ -214,6 +214,58 @@ class PrincipalTest < ActiveSupport::TestCase
     assert_equal [ roles(:acme_admin_role) ], principal.reload.roles
   end
 
+  def slack_search_attrs(foreign_id, kind: "slack_channel", epoch: "test-epoch")
+    default_attrs(
+      foreign_id: foreign_id,
+      kind: kind,
+      labels: { "managed-by" => "centaur", Principal::SLACK_SEARCH_EPOCH_LABEL => epoch }
+    )
+  end
+
+  def create_slack_search_role(epoch: "test-epoch")
+    Role.create!(
+      foreign_id: "slack-rts-#{epoch}",
+      name: "Slack RTS enrolled",
+      created_by: users(:acme_admin),
+      labels: { Principal::SLACK_SEARCH_EPOCH_LABEL => epoch }
+    )
+  end
+
+  test "slack principals created with the search epoch label start on the epoch role, not defaults" do
+    roles(:acme_infra).update!(assign_by_default: true)
+    rts = create_slack_search_role
+
+    %w[slack_channel slack_dm].each do |kind|
+      principal = Principal.new(slack_search_attrs("slack-#{kind}-enrolled", kind: kind))
+      principal.apply_default_sandbox_capabilities!
+      principal.save!
+
+      principal.reload
+      assert_equal [ rts ], principal.roles.to_a
+      Principal::SLACK_SEARCH_CAPABILITY_FLAGS.each_key { |flag| assert_not principal.public_send(flag), flag }
+    end
+  end
+
+  test "slack principals with an epoch label are refused when no isolated role matches" do
+    roles(:acme_infra).update!(assign_by_default: true)
+    create_slack_search_role(epoch: "other-epoch")
+
+    assert_no_difference -> { Principal.count } do
+      assert_raises(ActiveRecord::RecordInvalid) do
+        Principal.create!(slack_search_attrs("slack-channel-unmatched"))
+      end
+    end
+  end
+
+  test "epoch label on a non-slack principal leaves default roles alone" do
+    roles(:acme_infra).update!(assign_by_default: true)
+    create_slack_search_role
+
+    principal = Principal.create!(slack_search_attrs("workflow-labelled", kind: "workflow"))
+
+    assert_includes principal.reload.roles, roles(:acme_infra)
+  end
+
   test "configured defaults are not applied to existing roleless principals" do
     principal = principals(:acme_user_bob)
     principal.principal_roles.destroy_all
