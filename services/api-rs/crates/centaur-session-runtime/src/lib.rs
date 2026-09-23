@@ -328,10 +328,17 @@ pub struct SandboxRuntime {
     /// Optional out-of-band transport supplied by runtimes that can read artifacts.
     artifact_reader: Option<SandboxArtifactReader>,
     warm_spec_factory: Option<WarmSandboxSpecFactory>,
+    /// The workload's own warm spec, before `warm_capabilities` is applied.
+    /// Kept so a new profile replaces the old one instead of layering on it.
+    warm_base_spec_factory: Option<WarmSandboxSpecFactory>,
     workload_key: Option<String>,
     /// The harness warm sandboxes boot with. A warm claim is only valid for a
     /// session on the same harness; other sessions get a cold sandbox.
     warm_harness: Option<HarnessType>,
+    /// The capabilities warm sandboxes boot with. A warm claim is only valid
+    /// for a session whose principal resolves to exactly this profile; other
+    /// sessions get a cold sandbox.
+    warm_capabilities: SessionSandboxCapabilities,
 }
 
 #[derive(Clone, Debug)]
@@ -3333,21 +3340,24 @@ impl SessionRuntime {
             }
 
             // Warm sandboxes are pre-booted with the workload's default
-            // harness; a session on any other harness needs a cold sandbox.
+            // harness and the runtime's warm capability profile; a session on
+            // any other harness or profile needs a cold sandbox.
             let warm_harness_matches = self
                 .sandbox_runtime
                 .warm_harness
                 .as_ref()
                 .is_none_or(|warm| warm == harness_type);
             let warm_persona_matches = persona_context.is_none();
+            let warm_capabilities_match =
+                *desired_capabilities == self.sandbox_runtime.warm_capabilities;
             if !warm_harness_matches && self.warm_pool.is_some() {
                 record_sandbox_warm_pool_claim("harness_mismatch");
             }
             if !warm_persona_matches && self.warm_pool.is_some() {
                 record_sandbox_warm_pool_claim("persona_specific");
             }
-            if !desired_capabilities.is_default_enabled() && self.warm_pool.is_some() {
-                record_sandbox_warm_pool_claim("capabilities_non_default");
+            if !warm_capabilities_match && self.warm_pool.is_some() {
+                record_sandbox_warm_pool_claim("capabilities_mismatch");
             }
             if let Some(warm_pool) = self
                 .warm_pool
@@ -3356,7 +3366,7 @@ impl SessionRuntime {
                     boot_mode.uses_warm_pool()
                         && warm_harness_matches
                         && warm_persona_matches
-                        && desired_capabilities.is_default_enabled()
+                        && warm_capabilities_match
                 })
             {
                 match warm_pool
@@ -4497,8 +4507,10 @@ impl SandboxRuntime {
             spec_factory: Arc::new(spec_factory),
             artifact_reader: None,
             warm_spec_factory: None,
+            warm_base_spec_factory: None,
             workload_key: None,
             warm_harness: None,
+            warm_capabilities: SessionSandboxCapabilities::default_enabled(),
         }
     }
 
@@ -4520,9 +4532,11 @@ impl SandboxRuntime {
             manager: Arc::new(SandboxManager::new(backend)),
             spec_factory: Arc::new(spec_factory),
             artifact_reader: None,
-            warm_spec_factory: Some(warm_spec_factory),
+            warm_spec_factory: Some(warm_spec_factory.clone()),
+            warm_base_spec_factory: Some(warm_spec_factory),
             workload_key: Some(workload_key),
             warm_harness: None,
+            warm_capabilities: SessionSandboxCapabilities::default_enabled(),
         }
     }
 
@@ -4537,6 +4551,39 @@ impl SandboxRuntime {
         }));
         self
     }
+
+    /// Boot warm sandboxes with `capabilities` instead of the default profile.
+    ///
+    /// The profile is applied to the warm spec the same way a cold create
+    /// applies a session's capabilities, and the workload key hashes that
+    /// spec, so a warm sandbox booted under another profile never matches.
+    pub fn with_warm_capabilities(mut self, capabilities: SessionSandboxCapabilities) -> Self {
+        if let Some(base) = self.warm_base_spec_factory.clone() {
+            let warm_spec_factory = profiled_warm_spec_factory(base, &capabilities);
+            self.workload_key = Some(sandbox_spec_key(&warm_spec_factory()));
+            self.warm_spec_factory = Some(warm_spec_factory);
+        }
+        self.warm_capabilities = capabilities;
+        self
+    }
+}
+
+/// The warm spec factory for a capability profile. The default profile keeps
+/// the workload's own warm spec, and with it the workload key running
+/// deployments already hold.
+fn profiled_warm_spec_factory(
+    base: WarmSandboxSpecFactory,
+    capabilities: &SessionSandboxCapabilities,
+) -> WarmSandboxSpecFactory {
+    if capabilities.is_default_enabled() {
+        return base;
+    }
+    let capabilities = capabilities.clone();
+    Arc::new(move || {
+        let mut spec = base();
+        apply_sandbox_capabilities(&mut spec, &capabilities);
+        spec
+    })
 }
 
 impl SandboxWorkloadMode {
@@ -10631,10 +10678,28 @@ mod adoption_tests {
         }
     }
 
+    /// Full repo cache with observability off: what a principal gets when its
+    /// role turns observability off and leaves the repo cache default.
+    fn observability_off_capabilities() -> SessionSandboxCapabilities {
+        SessionSandboxCapabilities {
+            repo_cache: SessionRepoCacheAccess::All,
+            observability_enabled: false,
+        }
+    }
+
     fn runtime_with_warm_pool(
         store: &PgSessionStore,
         backend: Arc<MockBackend>,
         workload_marker: impl Into<String>,
+    ) -> SessionRuntime {
+        runtime_with_warm_pool_capabilities(store, backend, workload_marker, default_capabilities())
+    }
+
+    fn runtime_with_warm_pool_capabilities(
+        store: &PgSessionStore,
+        backend: Arc<MockBackend>,
+        workload_marker: impl Into<String>,
+        warm_capabilities: SessionSandboxCapabilities,
     ) -> SessionRuntime {
         let workload_marker = Arc::new(workload_marker.into());
         let claimed_marker = workload_marker.clone();
@@ -10654,7 +10719,8 @@ mod adoption_tests {
                         .env("WARM_POOL_TEST_MARKER", claimed_marker.as_str())
                 },
                 move || SandboxSpec::new("mock").env("WARM_POOL_TEST_MARKER", warm_marker.as_str()),
-            ),
+            )
+            .with_warm_capabilities(warm_capabilities),
             TestSessionPrincipalRegistrar,
         );
         let warm_pool = Arc::new(WarmPoolManager::new(
@@ -10825,6 +10891,200 @@ mod adoption_tests {
         let spec = backend.created_specs().pop().expect("created cold spec");
         assert!(!spec.capabilities.repo_cache.enabled());
         assert!(!spec.capabilities.observability_enabled);
+        reset_test_store(&store).await;
+    }
+
+    #[test]
+    fn warm_capabilities_profile_the_warm_spec_and_workload_key() {
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = SandboxRuntime::backend_with_warm_spec_factory(
+            backend,
+            |_thread_key, _execution_id, _harness, _persona| SandboxSpec::new("mock"),
+            || SandboxSpec::new("mock").env("WARM_POOL_TEST_MARKER", "profile"),
+        );
+        let default_key = runtime.workload_key.clone();
+
+        let profiled = runtime.with_warm_capabilities(observability_off_capabilities());
+        assert_ne!(profiled.workload_key, default_key);
+        assert_eq!(profiled.warm_capabilities, observability_off_capabilities());
+        let warm_spec = profiled
+            .warm_spec_factory
+            .clone()
+            .expect("warm spec factory");
+        let spec = warm_spec();
+        assert!(spec.capabilities.repo_cache.enabled());
+        assert!(!spec.capabilities.observability_enabled);
+        assert_eq!(
+            env_value(&spec, "CENTAUR_SANDBOX_OBSERVABILITY_ENABLED"),
+            Some("false")
+        );
+        let blocklist = env_value(&spec, "TOOL_BLOCKLIST").unwrap_or("");
+        for tool in OBSERVABILITY_TOOL_BLOCKLIST.split(',') {
+            assert!(blocklist.split(',').any(|blocked| blocked == tool));
+        }
+
+        // Going back to the default profile restores the workload's own warm
+        // spec instead of layering the default on top of the restricted one.
+        let restored = profiled.with_warm_capabilities(default_capabilities());
+        assert_eq!(restored.workload_key, default_key);
+        let warm_spec = restored
+            .warm_spec_factory
+            .clone()
+            .expect("warm spec factory");
+        let spec = warm_spec();
+        assert_eq!(
+            env_value(&spec, "CENTAUR_SANDBOX_OBSERVABILITY_ENABLED"),
+            None
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn matching_warm_capabilities_claim_warm_pool() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:cap-warm-claim-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        let execution_id = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create execution")
+            .execution
+            .execution_id;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with_warm_pool_capabilities(
+            &store,
+            backend.clone(),
+            thread_key.as_str(),
+            observability_off_capabilities(),
+        );
+        let workload_key = runtime
+            .warm_pool
+            .as_ref()
+            .unwrap()
+            .workload_key()
+            .to_owned();
+        let warm_sandbox_id = format!("warm-sbx-{}", uuid::Uuid::new_v4());
+        store
+            .insert_ready_warm_sandbox(&warm_sandbox_id, &workload_key)
+            .await
+            .expect("insert warm sandbox");
+
+        let sandbox_id = runtime
+            .ensure_session_sandbox(EnsureSessionSandboxRequest {
+                thread_key: &thread_key,
+                harness_type: &HarnessType::Codex,
+                persona_id: None,
+                existing_sandbox_id: None,
+                existing_sandbox_capabilities: None,
+                iron_control_principal: None,
+                requester_principal: None,
+                proxy_labels: &BTreeMap::new(),
+                desired_capabilities: &observability_off_capabilities(),
+                execution_id: &execution_id,
+            })
+            .await
+            .expect("ensure sandbox");
+
+        assert_eq!(sandbox_id, warm_sandbox_id);
+        assert!(backend.created_specs().is_empty());
+        let session = store.get_session(&thread_key).await.unwrap();
+        assert_eq!(
+            session.sandbox_capabilities,
+            Some(observability_off_capabilities())
+        );
+        let all = events(&store, &thread_key).await;
+        assert!(
+            all.iter()
+                .any(|event| event.event_type == "session.warm_sandbox_claimed")
+        );
+        reset_test_store(&store).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn default_capabilities_skip_restricted_warm_pool() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:cap-warm-default-{}", uuid::Uuid::new_v4())).unwrap();
+        store
+            .create_or_get_session(
+                &thread_key,
+                &HarnessType::Codex,
+                None,
+                json!({}),
+                Default::default(),
+            )
+            .await
+            .expect("create session");
+        let execution_id = store
+            .create_execution(&thread_key, None, json!({}))
+            .await
+            .expect("create execution")
+            .execution
+            .execution_id;
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with_warm_pool_capabilities(
+            &store,
+            backend.clone(),
+            thread_key.as_str(),
+            observability_off_capabilities(),
+        );
+        let workload_key = runtime
+            .warm_pool
+            .as_ref()
+            .unwrap()
+            .workload_key()
+            .to_owned();
+        let warm_sandbox_id = format!("warm-sbx-{}", uuid::Uuid::new_v4());
+        store
+            .insert_ready_warm_sandbox(&warm_sandbox_id, &workload_key)
+            .await
+            .expect("insert warm sandbox");
+
+        let sandbox_id = runtime
+            .ensure_session_sandbox(EnsureSessionSandboxRequest {
+                thread_key: &thread_key,
+                harness_type: &HarnessType::Codex,
+                persona_id: None,
+                existing_sandbox_id: None,
+                existing_sandbox_capabilities: None,
+                iron_control_principal: None,
+                requester_principal: None,
+                proxy_labels: &BTreeMap::new(),
+                desired_capabilities: &default_capabilities(),
+                execution_id: &execution_id,
+            })
+            .await
+            .expect("ensure sandbox");
+
+        // A default-profile session must not inherit a sandbox booted with
+        // observability off, so it cold-creates and the warm row stays ready.
+        assert_eq!(sandbox_id, "mock-sbx");
+        assert_eq!(
+            store
+                .claim_ready_warm_sandbox(&workload_key, thread_key.as_str())
+                .await
+                .expect("warm row should remain ready"),
+            Some(warm_sandbox_id)
+        );
+        let spec = backend.created_specs().pop().expect("created cold spec");
+        assert!(spec.capabilities.observability_enabled);
         reset_test_store(&store).await;
     }
 

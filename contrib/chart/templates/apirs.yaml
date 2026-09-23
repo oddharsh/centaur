@@ -330,6 +330,10 @@ spec:
               value: {{ .Values.apiRs.sandboxWarmPoolSize | quote }}
             - name: SESSION_SANDBOX_WARM_POOL_REPLENISH_INTERVAL_SECS
               value: {{ .Values.apiRs.sandboxWarmPoolReplenishIntervalSecs | quote }}
+            - name: SESSION_SANDBOX_WARM_POOL_OBSERVABILITY_ENABLED
+              value: {{ .Values.apiRs.sandboxWarmPoolObservabilityEnabled | quote }}
+            - name: SESSION_SANDBOX_WARM_POOL_REPO_CACHE_ACCESS
+              value: {{ .Values.apiRs.sandboxWarmPoolRepoCacheAccess | quote }}
             - name: SESSION_SANDBOX_RUNNING_LIMIT
               value: {{ .Values.apiRs.sandboxRunningLimit | quote }}
             - name: SESSION_SANDBOX_HOT_IDLE_GRACE_SECS
