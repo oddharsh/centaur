@@ -9857,6 +9857,7 @@ mod adoption_tests {
             &self,
             _: &str,
             _: Option<&Value>,
+            _: bool,
         ) -> Result<Principal, IronControlError> {
             self.get_principal("prn_test").await
         }
@@ -9864,6 +9865,7 @@ mod adoption_tests {
             &self,
             _: &str,
             _: Option<&Value>,
+            _: bool,
         ) -> Result<Option<Principal>, IronControlError> {
             Ok(None)
         }
