@@ -6,6 +6,9 @@ on:
   merge_group:
   push:
     branches: [main]
+  # Fork releases live on rebased rts/<upstream tag> branches that cannot open
+  # a clean PR against main; dispatch runs the full suite against main instead.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
