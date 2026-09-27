@@ -46,6 +46,9 @@ jobs:
             changed_files="$(git diff --name-only "${base}...HEAD")"
           elif [[ "${{ github.event_name }}" == "push" ]]; then
             changed_files="$(git diff --name-only "${{ github.event.before }}...HEAD")"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # A rebased release branch shares no useful base with main; test everything.
+            changed_files="$(git ls-files)"
           else
             git fetch --no-tags --depth=1 origin main
             changed_files="$(git diff --name-only origin/main...HEAD)"
