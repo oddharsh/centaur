@@ -50,6 +50,12 @@ jobs:
           elif [[ "${{ github.event_name }}" == "push" ]]; then
             base="${{ github.event.before }}"
             changed_files="$(git diff --name-only "${base}...HEAD")"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # A rebased release branch shares no useful base with main; test
+            # everything, and still check the chart version against main.
+            git fetch --no-tags origin main
+            base="origin/main"
+            changed_files="$(git ls-files)"
           else
             git fetch --no-tags --depth=1 origin main
             base="origin/main"
