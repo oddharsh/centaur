@@ -1392,9 +1392,11 @@ async fn ensure_slack_channel_allowed(
         return Ok(());
     }
 
-    let channel = slack_channel_info(client, config, channel_id).await?;
-    if slack_channel_has_default_access(&channel) {
-        return Ok(());
+    if public_channel_defaults_enabled() {
+        let channel = slack_channel_info(client, config, channel_id).await?;
+        if slack_channel_has_default_access(&channel) {
+            return Ok(());
+        }
     }
 
     Err(ApiError::Forbidden(
@@ -1403,7 +1405,25 @@ async fn ensure_slack_channel_allowed(
 }
 
 fn slack_channel_has_default_access(channel: &SlackChannel) -> bool {
-    !channel.is_private && channel.is_member
+    public_channel_defaults_enabled() && !channel.is_private && channel.is_member
+}
+
+/// Upstream grants every session history, download and upload on public
+/// channels the bot has joined. The Slack RTS rollout withholds direct Slack
+/// reads from enrolled principals (Slack answers go through the requester-only
+/// search-answer route), so while a search epoch is configured only explicit
+/// per-principal grants apply, as they did before the public default existed.
+fn public_channel_defaults_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        public_channel_defaults_allowed(
+            centaur_iron_control::configured_slack_search_epoch().as_deref(),
+        )
+    })
+}
+
+fn public_channel_defaults_allowed(slack_search_epoch: Option<&str>) -> bool {
+    slack_search_epoch.is_none()
 }
 
 fn slack_channel_ids_from_claims(claims: &SlackFileProxyClaims) -> Result<Vec<String>, ApiError> {
@@ -1902,6 +1922,12 @@ mod tests {
         ] {
             assert!(!slack_channel_has_default_access(&inaccessible));
         }
+    }
+
+    #[test]
+    fn slack_search_epoch_withholds_public_channel_defaults() {
+        assert!(public_channel_defaults_allowed(None));
+        assert!(!public_channel_defaults_allowed(Some("2026-09-rts")));
     }
 
     #[tokio::test]
