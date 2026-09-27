@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 import sys
 import types
 from pathlib import Path
@@ -99,8 +100,11 @@ def test_search_answer_validates_context_without_echoing_it() -> None:
 def test_search_answer_help_and_required_context() -> None:
     help_result = CliRunner().invoke(app, ["search-answer", "--help"])
     assert help_result.exit_code == 0
-    assert "requester-only" in help_result.output
-    assert "--context" in help_result.output
+    # Rich styles option names, so CI's color terminal splits "--context" with
+    # escape codes. Compare the text a reader sees.
+    help_text = re.sub(r"\x1b\[[0-9;]*m", "", help_result.output)
+    assert "requester-only" in help_text
+    assert "--context" in help_text
     assert CliRunner().invoke(app, ["search-answer", "Question"]).exit_code == 2
 
 
