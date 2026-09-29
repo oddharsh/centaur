@@ -739,6 +739,43 @@ async fn invalid_model_citation_prevents_delivery() {
     assert!(calls(&mock.state, "chat.postEphemeral").is_empty());
 }
 
+#[tokio::test]
+async fn more_than_five_valid_citations_deliver_the_first_five() {
+    let mut scenario = fixture();
+    scenario.history = json!({ "ok": true, "messages": (1..=6)
+        .map(|n| json!({ "ts": format!("200.00000{n}"), "text": format!("private source {n}") }))
+        .collect::<Vec<_>>() });
+    scenario.model_answer["citations"] = json!([1, 2, 3, 4, 5, 6, 7]);
+    let mock = mock(scenario).await;
+    mock.engine
+        .answer(&context(), "synthetic-action-token", "query")
+        .await
+        .unwrap();
+    let delivery = calls(&mock.state, "chat.postEphemeral");
+    let text = delivery[0]["text"].as_str().unwrap();
+    assert_eq!(text.matches("|Slack source ").count(), 5);
+    assert!(text.contains("|Slack source 5>"));
+    assert!(!text.contains("|Slack source 6>"));
+}
+
+#[tokio::test]
+async fn invented_citation_fails_with_a_model_answer_code() {
+    let mut scenario = fixture();
+    scenario.model_answer["citations"] = json!([1, 999]);
+    let mock = mock(scenario).await;
+    let error = mock
+        .engine
+        .answer(&context(), "synthetic-action-token", "query")
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("slack_search_invalid_model_answer")
+    );
+    assert!(calls(&mock.state, "chat.postEphemeral").is_empty());
+}
+
 #[test]
 fn sensitive_errors_and_config_rejections_are_fixed_codes() {
     assert!(

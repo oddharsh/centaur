@@ -116,6 +116,10 @@ fn malformed() -> ApiError {
     unavailable("slack_search_invalid_upstream_response")
 }
 
+fn invalid_answer() -> ApiError {
+    unavailable("slack_search_invalid_model_answer")
+}
+
 pub(crate) async fn answer(
     context: &SearchContext,
     action_token: &str,
@@ -667,22 +671,24 @@ impl Engine {
             serde_json::from_str(&output).map_err(|_| unavailable("slack_search_model_failed"))?;
         let text = string(&answer, "answer")
             .filter(|text| !text.trim().is_empty())
-            .ok_or_else(malformed)?
+            .ok_or_else(invalid_answer)?
             .to_owned();
+        // The schema cannot cap the array, so a model citing more than five
+        // sources keeps its first five. An invented source ID still fails.
         let mut citations = Vec::new();
         for citation in answer
             .get("citations")
             .and_then(Value::as_array)
-            .ok_or_else(malformed)?
+            .ok_or_else(invalid_answer)?
         {
             let id = citation
                 .as_u64()
                 .and_then(|id| usize::try_from(id).ok())
-                .ok_or_else(malformed)?;
-            if id == 0 || id > sources.items.len() || citations.len() >= 5 {
-                return Err(malformed());
+                .ok_or_else(invalid_answer)?;
+            if id == 0 || id > sources.items.len() {
+                return Err(invalid_answer());
             }
-            if !citations.contains(&id) {
+            if citations.len() < 5 && !citations.contains(&id) {
                 citations.push(id);
             }
         }
