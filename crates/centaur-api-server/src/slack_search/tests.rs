@@ -1,6 +1,7 @@
 use super::*;
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response as AxumResponse},
@@ -87,9 +88,13 @@ async fn mock_handler(
     State(state): State<Arc<Mutex<Scenario>>>,
     Path(method): Path<String>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    raw: Bytes,
 ) -> AxumResponse {
     let mut scenario = state.lock().unwrap();
+    let Some(body) = decode_body(&method, &headers, &raw) else {
+        scenario.calls.push((method.clone(), Value::Null));
+        return Json(json!({ "ok": false, "error": "invalid_arguments" })).into_response();
+    };
     if method == "messages" {
         assert_eq!(headers.get("x-api-key").unwrap(), "synthetic-model-key");
         assert_eq!(headers.get("anthropic-version").unwrap(), "2023-06-01");
@@ -164,6 +169,43 @@ async fn mock_handler(
         _ => panic!("unexpected method: {method}"),
     };
     Json(value).into_response()
+}
+
+/// Slack read methods ignore JSON bodies, so a JSON call to one of them
+/// reaches Slack with no arguments. The mock refuses the wrong encoding the
+/// same way Slack answers such a call: ok=false, invalid_arguments.
+const FORM_METHODS: &[&str] = &[
+    "auth.test",
+    "users.info",
+    "conversations.info",
+    "conversations.members",
+    "users.conversations",
+    "conversations.history",
+    "conversations.replies",
+];
+
+fn decode_body(method: &str, headers: &HeaderMap, raw: &[u8]) -> Option<Value> {
+    let content_type = headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if FORM_METHODS.contains(&method) {
+        if !content_type.starts_with("application/x-www-form-urlencoded") {
+            return None;
+        }
+        let query = std::str::from_utf8(raw).ok()?;
+        let url = Url::parse(&format!("http://form.invalid/?{query}")).ok()?;
+        let fields = url
+            .query_pairs()
+            .map(|(name, value)| (name.into_owned(), Value::String(value.into_owned())))
+            .collect();
+        Some(Value::Object(fields))
+    } else {
+        if !content_type.starts_with("application/json") {
+            return None;
+        }
+        serde_json::from_slice(raw).ok()
+    }
 }
 
 struct Mock {
@@ -264,7 +306,7 @@ async fn searches_unjoined_public_and_shared_private_history_then_delivers_only_
     let private = calls(&mock.state, "users.conversations");
     assert_eq!(
         private[0],
-        json!({ "user": "U1", "types": "private_channel", "exclude_archived": false, "limit": 10 })
+        json!({ "user": "U1", "types": "private_channel", "exclude_archived": "false", "limit": "10" })
     );
     assert_eq!(
         calls(&mock.state, "conversations.history")[0]["channel"],
@@ -609,14 +651,15 @@ async fn bounds_private_channel_root_and_thread_coverage() {
         .unwrap();
     let history = calls(&mock.state, "conversations.history");
     assert_eq!(history.len(), PRIVATE_CHANNELS);
-    assert!(
-        history
-            .iter()
-            .all(|body| body["limit"] == ROOTS_PER_CHANNEL)
-    );
+    assert!(history.iter().all(
+        |body| body["limit"].as_str().and_then(|limit| limit.parse().ok())
+            == Some(ROOTS_PER_CHANNEL)
+    ));
     let replies = calls(&mock.state, "conversations.replies");
     assert_eq!(replies.len(), PRIVATE_THREADS);
-    assert!(replies.iter().all(|body| body["limit"] == THREAD_REPLIES));
+    assert!(replies.iter().all(
+        |body| body["limit"].as_str().and_then(|limit| limit.parse().ok()) == Some(THREAD_REPLIES)
+    ));
     let model = calls(&mock.state, "responses");
     assert!(model[0]["input"].as_str().unwrap().len() < 96_000);
 }
