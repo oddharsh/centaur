@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use reqwest::{Client, Response, Url, redirect::Policy};
+use reqwest::{Client, RequestBuilder, Response, Url, redirect::Policy};
 use serde_json::{Value, json};
 
 use crate::ApiError;
@@ -202,12 +202,29 @@ impl Engine {
         Ok(Self { config, client })
     }
 
+    /// Calls a Slack read method with a form-encoded body. Read methods
+    /// (users.info, conversations.*) silently ignore JSON bodies: users.info
+    /// then answers user_not_found, and users.conversations drops its user
+    /// argument and lists the bot's own channels instead.
     async fn slack(&self, method: &'static str, input: Value) -> Result<Value, ApiError> {
-        let response = self
-            .client
+        let form = form_fields(&input)?;
+        self.send(self.request(method).form(&form)).await
+    }
+
+    /// Calls a Slack method that accepts JSON: assistant.search.context
+    /// (array arguments) and chat.postEphemeral.
+    async fn slack_json(&self, method: &'static str, input: Value) -> Result<Value, ApiError> {
+        self.send(self.request(method).json(&input)).await
+    }
+
+    fn request(&self, method: &'static str) -> RequestBuilder {
+        self.client
             .post(format!("{}/{}", self.config.slack_url, method))
             .bearer_auth(&self.config.bot_token)
-            .json(&input)
+    }
+
+    async fn send(&self, request: RequestBuilder) -> Result<Value, ApiError> {
+        let response = request
             .send()
             .await
             .map_err(|_| unavailable("slack_search_slack_failed"))?;
@@ -412,7 +429,7 @@ impl Engine {
         // is visible only to the verified requester.
         let delivery = json!({ "channel": context.channel_id, "user": context.user_id, "text": text, "parse": "none", "link_names": false });
         // No postMessage fallback or content-bearing result to the harness.
-        self.slack("chat.postEphemeral", delivery).await?;
+        self.slack_json("chat.postEphemeral", delivery).await?;
         Ok(())
     }
 
@@ -424,7 +441,7 @@ impl Engine {
         current_only: bool,
         sources: &mut Sources,
     ) -> Result<(), ApiError> {
-        let value = self.slack("assistant.search.context", json!({
+        let value = self.slack_json("assistant.search.context", json!({
             "query": query, "action_token": action_token, "context_channel_id": context.channel_id,
             "channel_types": ["public_channel"], "content_types": ["messages"],
             "include_context_messages": true, "include_bots": false, "sort": "score", "limit": 20
@@ -746,6 +763,24 @@ async fn bounded_json(mut response: Response, code: &'static str) -> Result<Valu
         bytes.extend_from_slice(&chunk);
     }
     serde_json::from_slice(&bytes).map_err(|_| unavailable(code))
+}
+
+/// Flattens a JSON object of scalar Slack arguments into form fields. An
+/// empty string (the first page's cursor) is omitted rather than sent blank.
+fn form_fields(input: &Value) -> Result<Vec<(&str, String)>, ApiError> {
+    let fields = input
+        .as_object()
+        .ok_or_else(|| unavailable("slack_search_slack_failed"))?;
+    let mut form = Vec::with_capacity(fields.len());
+    for (name, value) in fields {
+        match value {
+            Value::String(text) if text.is_empty() => {}
+            Value::String(text) => form.push((name.as_str(), text.clone())),
+            Value::Bool(_) | Value::Number(_) => form.push((name.as_str(), value.to_string())),
+            _ => return Err(unavailable("slack_search_slack_failed")),
+        }
+    }
+    Ok(form)
 }
 
 fn boolean(value: &Value, name: &str) -> Result<bool, ApiError> {
