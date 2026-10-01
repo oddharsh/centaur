@@ -108,6 +108,11 @@ spec:
                 secretKeyRef:
                   name: {{ required "telegram.existingSecretName is required" .Values.telegram.existingSecretName }}
                   key: TELEGRAM_SERVICE_TOKEN
+{{- with .Values.telegram.restrictedEgressRules }}
+            # Default-deny egress for a thread once it reads personal Telegram.
+            - name: CENTAUR_RESTRICTED_EGRESS_RULES
+              value: {{ toJson . | quote }}
+{{- end }}
 {{- end }}
             # Explicit secretKeyRefs only — never envFrom the shared Secret, or
             # its DATABASE_URL (ai_v2) would leak into console's env. Env

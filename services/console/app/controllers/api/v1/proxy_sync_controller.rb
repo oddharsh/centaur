@@ -14,11 +14,18 @@ module Api
     # entry per granted PgDsnSecret, keyed by foreign_id; the proxy's
     # locally-defined listeners bind to these by foreign_id.
     #
-    # The top-level `rules`, `mcp`, and `ingest_token` fields the proxy also
-    # understands are intentionally omitted: centaur-console has no models for them
-    # yet. Each secret still carries its own per-secret `rules`.
+    # Top-level `rules` (a default-deny allowlist) is sent only for a proxy
+    # whose thread read restricted data; see RestrictedEgress. The `mcp` and
+    # `ingest_token` fields the proxy also understands are intentionally
+    # omitted: centaur-console has no models for them yet. Each secret still
+    # carries its own per-secret `rules`.
+    #
+    # The config_hash a proxy sends is the one it last applied (iron-proxy
+    # adopts a hash only after applying its config), so it is recorded as the
+    # proxy's ack.
     class ProxySyncController < Api::ProxyBaseController
       def create
+        current_proxy.record_reported_config_hash!(params[:config_hash].presence)
         snapshot = current_proxy.sync_config_snapshot
         current_hash = snapshot[:config_hash]
 
@@ -29,7 +36,7 @@ module Api
           # unassigned). status and principal_id let an unassigned proxy tell "no
           # config yet" apart from "config is genuinely empty", and detect a swap.
           config = snapshot[:config]
-          render json: {
+          body = {
             config_hash: current_hash,
             status: current_proxy.status,
             principal_id: current_proxy.principal&.oid,
@@ -37,6 +44,8 @@ module Api
             transforms: config["transforms"],
             postgres: config["postgres"]
           }
+          body[:rules] = config["rules"] if config.key?("rules")
+          render json: body
         end
       end
     end

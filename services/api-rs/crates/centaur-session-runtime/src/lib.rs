@@ -31,7 +31,7 @@ use centaur_session_core::{
 };
 use centaur_session_sqlx::{
     PgSessionStore, SandboxCapacityCandidate, SessionEventListener, SessionStoreError,
-    default_metadata,
+    THREAD_KEY_PROXY_LABEL, default_metadata,
 };
 use centaur_telemetry::{
     record_sandbox_warm_pool_claim, record_session_execution_finished,
@@ -7426,7 +7426,13 @@ fn proxy_labels_from_session_metadata(
     thread_key: &ThreadKey,
     metadata: &Value,
 ) -> BTreeMap<String, String> {
-    let mut labels = BTreeMap::new();
+    // The console keys per-thread policy (restricted egress after a thread
+    // reads personal data) on this label, so it must follow the thread to
+    // every proxy that serves it, including after a sandbox is recycled.
+    let mut labels = BTreeMap::from([(
+        THREAD_KEY_PROXY_LABEL.to_owned(),
+        thread_key.as_str().to_owned(),
+    )]);
     insert_metadata_string_label(
         &mut labels,
         "centaur.slack_user_id",
@@ -9174,6 +9180,10 @@ mod tests {
                 ("centaur.slack_channel_id".to_owned(), "C456".to_owned()),
                 ("centaur.slack_team_id".to_owned(), "T123".to_owned()),
                 ("centaur.slack_user_id".to_owned(), "U123".to_owned()),
+                (
+                    "centaur.thread_key".to_owned(),
+                    "slack:T123:C123:1700000000.000000".to_owned(),
+                ),
             ])
         );
     }
@@ -9194,6 +9204,10 @@ mod tests {
             BTreeMap::from([
                 ("centaur.slack_team_id".to_owned(), "T123".to_owned()),
                 ("centaur.slack_user_id".to_owned(), "U123".to_owned()),
+                (
+                    "centaur.thread_key".to_owned(),
+                    "linear:CEN-123:s:agent-session".to_owned(),
+                ),
             ])
         );
     }
@@ -11156,6 +11170,10 @@ mod adoption_tests {
                 BTreeMap::from([
                     ("centaur.slack_channel_id".to_owned(), "C123".to_owned()),
                     ("centaur.slack_team_id".to_owned(), "T123".to_owned()),
+                    (
+                        THREAD_KEY_PROXY_LABEL.to_owned(),
+                        thread_key.as_str().to_owned(),
+                    ),
                 ])
             )]
         );

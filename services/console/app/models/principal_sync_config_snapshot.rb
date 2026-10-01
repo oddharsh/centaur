@@ -55,7 +55,8 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
     else
       rendered_principal_config_for_proxy(proxy)
     end
-    with_sandbox_entitlements_secret_for_proxy(proxy, config, hosts: sandbox_entitlements_hosts)
+    config = with_sandbox_entitlements_secret_for_proxy(proxy, config, hosts: sandbox_entitlements_hosts)
+    with_restricted_egress_rules_for_proxy(proxy, config, hosts: sandbox_entitlements_hosts)
   end
 
   def self.sync_secrets_for(principal)
@@ -263,6 +264,17 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
     end
   end
   private_class_method :with_sandbox_entitlements_secret_for_proxy
+
+  # A thread that read restricted data gets top-level `rules`, which iron-proxy
+  # turns into a default-deny allowlist (see RestrictedEgress). Added only when
+  # latched, so every other proxy's config and hash are unchanged. Evaluated on
+  # every poll, never cached, so a latch reaches the proxy on its next sync.
+  def self.with_restricted_egress_rules_for_proxy(proxy, config, hosts:)
+    return config unless RestrictedEgress.restricted?(proxy)
+
+    config.merge("rules" => RestrictedEgress.rules_for(sandbox_entitlements_hosts: hosts))
+  end
+  private_class_method :with_restricted_egress_rules_for_proxy
 
   def self.sandbox_entitlements_secret_for_proxy(proxy, hosts:)
     rules = Principal.normalize_hosts(hosts)
