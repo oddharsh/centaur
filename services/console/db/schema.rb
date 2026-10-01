@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
+ActiveRecord::Schema[8.1].define(version: 2026_10_01_160000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pg_search"
@@ -335,6 +335,8 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
     t.string "name", null: false
     t.datetime "principal_assigned_at"
     t.bigint "principal_id"
+    t.string "reported_config_hash"
+    t.datetime "reported_config_hash_at"
     t.datetime "requester_principal_assigned_at"
     t.bigint "requester_principal_id"
     t.datetime "updated_at", null: false
@@ -365,6 +367,16 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
     t.index ["oauth_token_secret_id"], name: "index_request_rules_on_oauth_token_secret_id"
     t.index ["position"], name: "index_request_rules_on_position"
     t.index ["static_secret_id"], name: "index_request_rules_on_static_secret_id"
+  end
+
+  create_table "restricted_threads", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.bigint "principal_id"
+    t.string "source", null: false
+    t.string "thread_key", null: false
+    t.datetime "updated_at", null: false
+    t.index ["principal_id"], name: "index_restricted_threads_on_principal_id"
+    t.index ["thread_key"], name: "index_restricted_threads_on_thread_key", unique: true
   end
 
   create_table "roles", force: :cascade do |t|
@@ -605,6 +617,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_08_23_054500) do
   add_foreign_key "request_rules", "hmac_secrets"
   add_foreign_key "request_rules", "oauth_token_secrets"
   add_foreign_key "request_rules", "static_secrets"
+  add_foreign_key "restricted_threads", "principals", on_delete: :nullify
   add_foreign_key "roles", "users", column: "created_by_id"
   add_foreign_key "scheduled_tasks", "users", column: "author_id"
   add_foreign_key "secret_sources", "aws_auth_secrets"

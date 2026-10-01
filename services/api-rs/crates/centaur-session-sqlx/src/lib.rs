@@ -30,6 +30,9 @@ use uuid::Uuid;
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 pub const SESSION_EVENTS_CHANNEL: &str = "centaur_session_events";
+/// Proxy label carrying the session's thread key. The console keys
+/// per-thread proxy policy on it (restricted egress after personal data).
+pub const THREAD_KEY_PROXY_LABEL: &str = "centaur.thread_key";
 const DEFAULT_MAX_CONNECTIONS: u32 = 500;
 
 #[derive(Clone, Debug)]
@@ -204,6 +207,28 @@ impl PgSessionStore {
             .bind(Json(proxy_labels.clone()))
             .execute(&self.pool)
             .await?;
+
+        // Labels are otherwise fixed at first write. The thread label arrived
+        // after many sessions were labelled, and the console keys per-thread
+        // policy on it, so merge it into older sessions without touching any
+        // label they already carry.
+        if let Some(thread_label) = proxy_labels.get(THREAD_KEY_PROXY_LABEL) {
+            sqlx::query(
+                r#"
+                update sessions
+                set proxy_labels = proxy_labels || jsonb_build_object($2::text, $3::text),
+                    updated_at = now()
+                where thread_key = $1
+                  and proxy_labels <> '{}'::jsonb
+                  and not (proxy_labels ? $2::text)
+                "#,
+            )
+            .bind(thread_key.as_str())
+            .bind(THREAD_KEY_PROXY_LABEL)
+            .bind(thread_label)
+            .execute(&self.pool)
+            .await?;
+        }
 
         if !proxy_labels.is_empty() {
             sqlx::query(
@@ -2295,6 +2320,42 @@ mod tests {
                 .expect("get session")
                 .proxy_labels,
             labels
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn older_sessions_gain_only_the_thread_label() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let thread_key = ThreadKey::parse(format!("test:thread-label-{}", Uuid::new_v4())).unwrap();
+        let original = BTreeMap::from([("centaur.slack_user_id".to_owned(), "U_FIRST".to_owned())]);
+        store
+            .create_or_get_session(&thread_key, &HarnessType::Codex, None, json!({}), original)
+            .await
+            .expect("create session");
+
+        let later = BTreeMap::from([
+            ("centaur.slack_user_id".to_owned(), "U_LATER".to_owned()),
+            (
+                super::THREAD_KEY_PROXY_LABEL.to_owned(),
+                thread_key.as_str().to_owned(),
+            ),
+        ]);
+        let session = store
+            .create_or_get_session(&thread_key, &HarnessType::Codex, None, json!({}), later)
+            .await
+            .expect("get session");
+
+        assert_eq!(
+            session.proxy_labels,
+            BTreeMap::from([
+                ("centaur.slack_user_id".to_owned(), "U_FIRST".to_owned()),
+                (
+                    super::THREAD_KEY_PROXY_LABEL.to_owned(),
+                    thread_key.as_str().to_owned(),
+                ),
+            ])
         );
     }
 
