@@ -11170,6 +11170,10 @@ mod adoption_tests {
                 BTreeMap::from([
                     ("centaur.slack_channel_id".to_owned(), "C123".to_owned()),
                     ("centaur.slack_team_id".to_owned(), "T123".to_owned()),
+                    (
+                        THREAD_KEY_PROXY_LABEL.to_owned(),
+                        thread_key.as_str().to_owned(),
+                    ),
                 ])
             )]
         );

@@ -10,6 +10,9 @@ class RestrictedThread < ApplicationRecord
 
   belongs_to :principal, optional: true
 
-  validates :thread_key, presence: true, uniqueness: true
+  # Uniqueness is the database index's job: a model-level check would fail an
+  # already-latched thread's next read before create_or_find_by! can fall back
+  # to the existing row.
+  validates :thread_key, presence: true
   validates :source, inclusion: { in: SOURCES }
 end
