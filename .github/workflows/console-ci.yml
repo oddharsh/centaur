@@ -13,7 +13,7 @@ defaults:
 jobs:
   console_changes:
     name: Detect Console CI changes
-    runs-on: depot-ubuntu-24.04
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     outputs:
       relevant: ${{ steps.filter.outputs.relevant }}
     defaults:
@@ -167,7 +167,7 @@ jobs:
 
   console-ci-success:
     name: Console CI success
-    runs-on: depot-ubuntu-24.04
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     if: always()
     needs:
       - console_changes

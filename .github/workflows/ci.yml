@@ -20,7 +20,7 @@ permissions:
 jobs:
   ci_changes:
     name: Detect CI changes
-    runs-on: depot-ubuntu-24.04
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     outputs:
       migration_order: ${{ steps.filter.outputs.migration_order }}
       harness_server_checks: ${{ steps.filter.outputs.harness_server_checks }}
@@ -238,7 +238,7 @@ jobs:
 
   company-context-checks:
     name: Company context fmt, clippy, and tests
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04-16' || 'ubuntu-24.04' }}
     needs: ci_changes
     if: needs.ci_changes.outputs.company_context_checks == 'true'
     defaults:
@@ -278,7 +278,7 @@ jobs:
 
   proxy-sync-checks:
     name: Proxy sync fmt, clippy, and tests
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04-16' || 'ubuntu-24.04' }}
     needs: ci_changes
     if: needs.ci_changes.outputs.proxy_sync_checks == 'true'
     defaults:
@@ -417,7 +417,7 @@ jobs:
 
   rust-api-postgres:
     name: Rust API migrations on PostgreSQL
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04-16' || 'ubuntu-24.04' }}
     needs: ci_changes
     if: needs.ci_changes.outputs.rust_api == 'true'
     steps:
@@ -451,7 +451,7 @@ jobs:
 
   sandbox-tests:
     name: Sandbox Python tests
-    runs-on: depot-ubuntu-24.04-4
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04-4' || 'ubuntu-24.04' }}
     needs: ci_changes
     if: needs.ci_changes.outputs.sandbox_tests == 'true'
     steps:
@@ -474,7 +474,7 @@ jobs:
 
   workflow-python-tests:
     name: Workflow Python tests
-    runs-on: depot-ubuntu-24.04-4
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04-4' || 'ubuntu-24.04' }}
     needs: ci_changes
     if: needs.ci_changes.outputs.workflow_python_tests == 'true'
     steps:
@@ -506,7 +506,7 @@ jobs:
 
   tool-tests:
     name: Tool tests
-    runs-on: depot-ubuntu-24.04-4
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04-4' || 'ubuntu-24.04' }}
     needs: ci_changes
     if: needs.ci_changes.outputs.tool_tests == 'true'
     steps:
@@ -562,7 +562,7 @@ jobs:
 
   linearbot-tests:
     name: Linearbot typecheck and tests
-    runs-on: depot-ubuntu-24.04-16
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04-16' || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -692,7 +692,7 @@ jobs:
 
   ci-success:
     name: CI success
-    runs-on: depot-ubuntu-24.04
+    runs-on: ${{ github.repository == 'paradigmxyz/centaur' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     if: always()
     needs:
       - ci_changes
