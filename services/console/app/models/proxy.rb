@@ -55,6 +55,14 @@ class Proxy < ApplicationRecord
     sync_config_snapshot.fetch(:config_hash)
   end
 
+  # Record the hash the proxy says it has applied. Written only when it
+  # changes, so steady-state polling costs no writes.
+  def record_reported_config_hash!(reported)
+    return if reported.blank? || reported == reported_config_hash
+
+    update_columns(reported_config_hash: reported, reported_config_hash_at: Time.current)
+  end
+
   def self.sandbox_entitlements_hosts
     [ Principal.host_from_url(ENV["CENTAUR_CONSOLE_URL"]) ]
   end

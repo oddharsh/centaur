@@ -557,6 +557,38 @@ class ProxySyncControllerTest < ActionDispatch::IntegrationTest
     refute json_body.key?("secrets")
   end
 
+  test "a proxy on a restricted thread syncs a default-deny allowlist and a new hash" do
+    thread = "slack:T0123456789:D0123456789:1700000000.000100"
+    @proxy.update!(labels: { RestrictedEgress::THREAD_KEY_LABEL => thread })
+    rules = [ { "host" => "api.anthropic.com" } ]
+
+    with_env(RestrictedEgress::RULES_ENV => rules.to_json, "CENTAUR_CONSOLE_URL" => "https://console.example") do
+      post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+      open_hash = json_body.fetch("config_hash")
+      refute json_body.key?("rules")
+
+      RestrictedThread.create!(thread_key: thread, source: "personal_telegram")
+      post api_v1_proxy_sync_url, params: { config_hash: open_hash }.to_json, headers: auth_headers
+      assert_response :ok
+      refute_equal open_hash, json_body.fetch("config_hash")
+      assert_equal rules.first, json_body.fetch("rules").first
+      assert_equal "console.example", json_body.fetch("rules").last.fetch("host")
+      # The rest of the config is unchanged; only egress narrows.
+      assert_equal 2, json_body.fetch("secrets").length
+    end
+  end
+
+  test "sync records the hash the proxy reports as applied" do
+    post api_v1_proxy_sync_url, params: { config_hash: "sha256:#{'1' * 64}" }.to_json, headers: auth_headers
+    assert_response :ok
+    @proxy.reload
+    assert_equal "sha256:#{'1' * 64}", @proxy.reported_config_hash
+    assert_not_nil @proxy.reported_config_hash_at
+
+    post api_v1_proxy_sync_url, params: {}.to_json, headers: auth_headers
+    assert_equal "sha256:#{'1' * 64}", @proxy.reload.reported_config_hash
+  end
+
   def jwt_payload(token)
     _header, payload, _signature = token.split(".")
     JSON.parse(Base64.urlsafe_decode64(payload))

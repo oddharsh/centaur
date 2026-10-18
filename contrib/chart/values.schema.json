@@ -122,6 +122,23 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "existingSecretName": { "type": "string" },
+        "restrictedEgressRules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "host": { "type": "string", "minLength": 1 },
+              "cidr": { "type": "string", "minLength": 1 },
+              "methods": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+              "paths": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+            },
+            "oneOf": [
+              { "required": ["host"], "not": { "required": ["cidr"] } },
+              { "required": ["cidr"], "not": { "required": ["host"] } }
+            ]
+          }
+        },
         "image": {
           "type": "object",
           "properties": {

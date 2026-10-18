@@ -15,6 +15,16 @@ telegram:
   # Contains TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION_KEY (Fernet),
   # and TELEGRAM_SERVICE_TOKEN (at least 32 random characters).
   existingSecretName: ""
+  # Hosts a thread may still reach after it reads personal Telegram. Console
+  # turns these into a default-deny allowlist on every proxy serving that
+  # thread, plus Console's own sandbox routes. Include the model provider and
+  # any first-party API the agent needs; leave out the open web. Each rule has
+  # exactly one of host or cidr, and optional methods and paths. While empty,
+  # Console refuses personal Telegram reads.
+  #   - host: api.anthropic.com
+  #   - host: "*.googleapis.com"
+  #     methods: [GET]
+  restrictedEgressRules: []
   storage:
     size: 1Gi
     storageClassName: ""

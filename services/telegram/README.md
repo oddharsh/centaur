@@ -20,10 +20,19 @@ It does not download media, send messages, or index Telegram into company contex
    workspace-qualified Slack IDs and an active Console user with that exact
    Slack SSO identity. Shared channels, group DMs, ambiguous identities, disabled
    users, stale assignments, and requester credential overrides fail closed.
-3. Console supplies the authenticated owner's opaque user ID and an internal
+3. Before any Telegram data reaches the sandbox, Console latches the calling
+   thread (the proxy's `centaur.thread_key` label, set by api-rs) as
+   restricted. Every proxy serving that thread from then on syncs a
+   default-deny allowlist built from `CENTAUR_RESTRICTED_EGRESS_RULES`, and
+   Console waits until the proxy reports that config (up to 30 seconds). This
+   closes the path where a later web fetch in the same thread carries Telegram
+   content out in a URL. Missing rules, a missing thread label, or no
+   confirmation all refuse the read. The latch has no expiry because the
+   thread's transcript keeps the data in context.
+4. Console supplies the authenticated owner's opaque user ID and an internal
    service credential. Caller arguments cannot choose an owner. The service is
    inaccessible from sandbox pods under its Kubernetes NetworkPolicy.
-4. Every MCP call opens only that owner's encrypted session. Each owner has a
+5. Every MCP call opens only that owner's encrypted session. Each owner has a
    separate lock; disconnect removes local access and asks Telegram to revoke
    that session. If Telegram is unreachable, the UI asks the user to also revoke
    it under Telegram Settings → Devices.
