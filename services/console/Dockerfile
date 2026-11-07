@@ -3,7 +3,7 @@
 
 # This Dockerfile is designed for production, not development. It builds from
 # the repository root so the console SPA (services/console/web) can install from
-# the pnpm workspace lockfile. Build'n'run by hand from the repo root:
+# the Bun workspace lockfile. Build'n'run by hand from the repo root:
 # docker build -t iron_control -f services/console/Dockerfile .
 # docker run -d -p 80:80 -e RAILS_MASTER_KEY=<value from config/master.key> --name iron_control iron_control
 
@@ -11,20 +11,18 @@
 
 # Make sure RUBY_VERSION matches the Ruby version in .ruby-version
 ARG RUBY_VERSION=3.4.12
-ARG NODE_VERSION=24
 
 # Build the console SPA: hashed assets into services/console/public/spa and
 # the shell into services/console/spa-shell (served only by SpaController).
-FROM docker.io/library/node:$NODE_VERSION-slim AS web
+FROM docker.io/oven/bun:1.4.4-slim AS web
 WORKDIR /repo
-RUN npm install -g pnpm@10.34.9
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY package.json bun.lock bunfig.toml ./
 COPY patches/ patches/
 COPY services/console/web/package.json services/console/web/package.json
-RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
-    pnpm install --filter @centaur/console-web --frozen-lockfile
+RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \
+    bun install --filter @centaur/console-web --frozen-lockfile
 COPY services/console/web/ services/console/web/
-RUN pnpm -C services/console/web build
+RUN bun run --cwd services/console/web build
 
 FROM docker.io/library/ruby:$RUBY_VERSION-slim AS base
 

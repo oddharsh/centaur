@@ -115,7 +115,7 @@ _build-workflow-python:
     just _build-api-rs
     just _build-agent
 
-# The console builds from the repo root so its SPA can use the pnpm workspace
+# The console builds from the repo root so its SPA can use the Bun workspace
 # lockfile; services/console/Dockerfile.dockerignore limits the context.
 _build-console:
     docker build -t centaur-console:latest -f services/console/Dockerfile .

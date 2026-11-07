@@ -17,8 +17,8 @@ on:
       - workflows/**
       - scripts/bootstrap-k8s-secrets.sh
       - package.json
-      - pnpm-lock.yaml
-      - pnpm-workspace.yaml
+      - bun.lock
+      - bunfig.toml
       - .agents/skills/**
   pull_request:
   workflow_dispatch:

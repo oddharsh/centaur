@@ -27,7 +27,7 @@ Use `README.md` and `docs/API.md` for the supported behavior and API shapes.
   validation order, and redirects stable. The SPA reaches `/login` and
   `/pending` with full page loads.
 - `SpaController` (`lib/spa_request.rb`) serves `spa-shell/index.html` for any
-  browser navigation no route claims; `pnpm -C web build` puts only hashed
+  browser navigation no route claims; `bun run --cwd web build` puts only hashed
   assets in `public/spa`. Never put the shell back under `public/`: static
   files get no Content-Security-Policy. The other browser-facing Rails routes
   (SSO `/auth/:provider/*`, broker OAuth `/oauth/:slug/*`, MCP OAuth
@@ -181,11 +181,11 @@ The SPA lives in `web/` (Vite, React, TypeScript, shadcn/ui, TanStack Query).
 From `services/console`:
 
 ```bash
-pnpm install --frozen-lockfile --filter @centaur/console-web
-pnpm -C web typecheck
-pnpm -C web lint
-pnpm -C web test
-pnpm -C web build   # assets into public/spa, shell into spa-shell/ (served by SpaController)
+bun install --frozen-lockfile --filter @centaur/console-web
+bun run --cwd web typecheck
+bun run --cwd web lint
+bun run --cwd web test
+bun run --cwd web build   # assets into public/spa, shell into spa-shell/ (served by SpaController)
 ```
 
 SPA tests cover logic and secret handling only (API client, formatting, local

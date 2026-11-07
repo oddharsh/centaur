@@ -90,6 +90,6 @@ class SpaControllerTest < ActionDispatch::IntegrationTest
     SpaController.index_path = File.join(@dir, "missing.html")
     get "/console/spa-only-page", headers: HTML
     assert_response :service_unavailable
-    assert_includes response.body, "pnpm -C services/console/web build"
+    assert_includes response.body, "bun run --cwd services/console/web build"
   end
 end

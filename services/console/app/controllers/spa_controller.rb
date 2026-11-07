@@ -15,8 +15,8 @@ class SpaController < ActionController::Base
 
   NOT_BUILT_MESSAGE = <<~TEXT.freeze
     The console web app has not been built.
-    Run `pnpm -C services/console/web build`, or use the Vite dev server
-    (`pnpm -C services/console/web dev`) during development.
+    Run `bun run --cwd services/console/web build`, or use the Vite dev server
+    (`bun run --cwd services/console/web dev`) during development.
   TEXT
 
   def show

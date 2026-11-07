@@ -14,9 +14,9 @@ This is shaped after Centaur's Slack/Discord services:
 ## Run Locally
 
 ```bash
-pnpm install
-pnpm test
-pnpm simulate "Reply exactly PONG."
+bun install
+bun run test
+bun run simulate "Reply exactly PONG."
 ```
 
 The simulator starts an in-process mock Centaur API, so it does not need real

@@ -1,2 +1,2 @@
 web: bin/rails server
-vite: pnpm -C web dev
+vite: bun run --cwd web dev
