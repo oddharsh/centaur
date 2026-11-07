@@ -32,9 +32,9 @@ Key modules are `src/teamsbot.ts`, `src/session-api.ts`,
 From the repository root:
 
 ```bash
-pnpm --filter teamsbot run check:types
-pnpm --filter teamsbot test
-pnpm --filter teamsbot simulate -- "Reply exactly PONG."
+bun run --filter teamsbot check:types
+bun run --filter teamsbot test
+bun run --filter teamsbot simulate "Reply exactly PONG."
 ```
 
 The simulator uses a mock Centaur API and needs no Teams credential. Add tests

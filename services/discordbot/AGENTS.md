@@ -33,8 +33,8 @@ Key modules are `src/gateway.ts`, `src/discord-allowlist.ts`,
 From the repository root:
 
 ```bash
-pnpm --filter discordbot run check:types
-pnpm --filter discordbot test
+bun run --filter discordbot check:types
+bun run --filter discordbot test
 ```
 
 The unit suite uses fakes and needs no Discord credential. Add focused coverage

@@ -34,8 +34,8 @@ thread behavior.
 From the repository root:
 
 ```bash
-pnpm --filter linearbot run check:types
-pnpm --filter linearbot test
+bun run --filter linearbot check:types
+bun run --filter linearbot test
 ```
 
 The test suite includes a signed-webhook/fake-GraphQL path; extend it for

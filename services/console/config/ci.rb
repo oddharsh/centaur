@@ -2,17 +2,17 @@
 
 CI.run do
   step "Setup", "bin/setup --skip-server"
-  step "Setup: SPA dependencies", "pnpm install --frozen-lockfile --filter @centaur/console-web"
+  step "Setup: SPA dependencies", "bun install --frozen-lockfile --filter @centaur/console-web"
 
   step "Style: Ruby", "bin/rubocop"
 
   step "Security: Gem audit", "bin/bundler-audit"
   step "Security: Brakeman code analysis", "bin/brakeman --quiet --no-pager --exit-on-warn --exit-on-error"
 
-  step "Web: Typecheck", "pnpm -C web typecheck"
-  step "Web: Lint", "pnpm -C web lint"
-  step "Web: Test", "pnpm -C web test"
-  step "Web: Build", "pnpm -C web build"
+  step "Web: Typecheck", "bun run --cwd web typecheck"
+  step "Web: Lint", "bun run --cwd web lint"
+  step "Web: Test", "bun run --cwd web test"
+  step "Web: Build", "bun run --cwd web build"
 
   step "Tests: Rails", "bin/rails test"
   step "Tests: Seeds", "env RAILS_ENV=test bin/rails db:seed:replant"

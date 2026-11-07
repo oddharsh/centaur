@@ -37,7 +37,7 @@ result pages stay server-rendered by Rails, so installed MCP clients keep the
 behaviour they were built against, sign-in works without JavaScript, and pods
 on either side of a rolling deploy accept each other's forms.
 
-- **Serving.** `pnpm -C web build` writes content-hashed assets to
+- **Serving.** `bun run --cwd web build` writes content-hashed assets to
   `public/spa` (URLs under `/spa/`) and the HTML shell to
   `spa-shell/index.html`. The shell is kept outside `public/` because the
   static file server would serve it without the Content-Security-Policy.
@@ -74,8 +74,8 @@ on either side of a rolling deploy accept each other's forms.
 
 Console runs on stock PostgreSQL 16, including managed services such as RDS
 and Cloud SQL. Install Docker, Ruby using the version in `.ruby-version`,
-Node.js with pnpm (the versions CI uses are in
-`.github/workflows/console-ci.yml`), and Overmind or Foreman, then run:
+Bun (the version CI uses is `packageManager` in the root `package.json`;
+see `.github/workflows/console-ci.yml`), and Overmind or Foreman, then run:
 
 ```bash
 just dev

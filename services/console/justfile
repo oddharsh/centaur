@@ -38,17 +38,17 @@ postgres:
 # Install gem and SPA dependencies if needed.
 deps:
     @bundle check || bundle install
-    pnpm install --frozen-lockfile --filter @centaur/console-web
+    bun install --frozen-lockfile --filter @centaur/console-web
 
 # Build the SPA: assets into public/spa, the shell into spa-shell/ (served by SpaController).
 web-build:
-    pnpm -C web build
+    bun run --cwd web build
 
 # Typecheck, lint, and test the SPA.
 web-check:
-    pnpm -C web typecheck
-    pnpm -C web lint
-    pnpm -C web test
+    bun run --cwd web typecheck
+    bun run --cwd web lint
+    bun run --cwd web test
 
 # Run the full local CI sequence (bin/ci): Ruby and SPA checks, audits, tests.
 ci:

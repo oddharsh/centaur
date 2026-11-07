@@ -55,8 +55,8 @@ lifecycle, harness formatting, and durable execution state belong in `api-rs`.
 From the repository root:
 
 ```bash
-pnpm --filter slackbotv2 run check:types
-pnpm --filter slackbotv2 test
+bun run --filter slackbotv2 check:types
+bun run --filter slackbotv2 test
 ```
 
 Use targeted tests while iterating, especially `test/session-api.test.ts`,

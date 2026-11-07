@@ -45,8 +45,8 @@ Tests should cover signature/auth rejection, self-message loops, duplicate
 deliveries, session API failures, replay/reconnect behavior, and terminal render
 outcomes where applicable.
 
-All TypeScript services belong to the root pnpm workspace. Install dependencies
-once from the repository root with `pnpm install --frozen-lockfile`; their
+All TypeScript services belong to the root Bun workspace. Install dependencies
+once from the repository root with `bun install --frozen-lockfile`; their
 scripts invoke Bun for runtime, tests, and type checking. Do not create nested
 lockfiles. If Chat SDK behavior is unclear, inspect `~/github/vercel/chat` and
 the repository's registered patches, not `node_modules`.

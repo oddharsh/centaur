@@ -38,8 +38,8 @@ behavioral contract and supported webhook events are documented in `README.md`.
 From the repository root:
 
 ```bash
-pnpm --filter githubbot run check:types
-pnpm --filter githubbot test
+bun run --filter githubbot check:types
+bun run --filter githubbot test
 ```
 
 Add focused tests for authorization, signature rejection, deduplication,

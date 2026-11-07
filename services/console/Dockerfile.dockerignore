@@ -2,8 +2,8 @@
 # workspace manifests and the console service are sent.
 *
 !package.json
-!pnpm-lock.yaml
-!pnpm-workspace.yaml
+!bun.lock
+!bunfig.toml
 !patches/
 !services/console/
 

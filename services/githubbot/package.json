@@ -7,7 +7,7 @@
     "dev": "bun --hot --watch src/server.ts",
     "start": "bun src/server.ts",
     "test": "bun test test",
-    "check:types": "bun tsgo --project tsconfig.json --noEmit"
+    "check:types": "bun check"
   },
   "dependencies": {
     "@centaur/harness-events": "workspace:*",
@@ -24,8 +24,6 @@
     "@chat-adapter/state-memory": "4.31.0",
     "@types/pg": "^8.23.1",
     "@types/bun": "^1.4.4",
-    "@types/node": "^26.6.6",
-    "@typescript/native-preview": "^7.0.0-dev.20260707.2",
-    "typescript": "^7.0.2"
+    "@types/node": "^26.6.6"
   }
 }

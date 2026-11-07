@@ -6,14 +6,13 @@
   "types": "src/index.ts",
   "scripts": {
     "test": "bun test src",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "bun check"
   },
   "dependencies": {
     "@centaur/harness-events": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "^1.4.4",
-    "@types/node": "^26.6.6",
-    "typescript": "7.0.2"
+    "@types/node": "^26.6.6"
   }
 }

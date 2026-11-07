@@ -106,7 +106,7 @@ mentionable and assignable in the first place, not an agent-session add-on.
 
 ## Patched adapter
 
-`patches/@chat-adapter__linear@4.31.0.patch` (registered in `pnpm-workspace.yaml`) carries three
+`patches/@chat-adapter__linear@4.31.0.patch` (registered in the root `package.json`) carries three
 fixes to the agent-session path. They are still applied but matter only if agent sessions are ever
 enabled (they are off today, see above):
 
