@@ -8,8 +8,8 @@
     "start": "bun src/server.ts",
     "simulate": "bun dev/simulate.ts",
     "test": "bun test test/*.test.ts",
-    "check:types": "bun tsgo --project tsconfig.json --noEmit",
-    "typecheck": "bun tsgo --project tsconfig.json --noEmit"
+    "check:types": "bun check",
+    "typecheck": "bun check"
   },
   "dependencies": {
     "@centaur/harness-events": "workspace:*",
@@ -26,8 +26,6 @@
     "@types/bun": "^1.4.4",
     "@types/express": "5.0.6",
     "@types/node": "^26.6.5",
-    "@types/pg": "^8.23.1",
-    "@typescript/native-preview": "^7.0.0-dev.20260707.2",
-    "typescript": "^7.0.2"
+    "@types/pg": "^8.23.1"
   }
 }
