@@ -115,7 +115,7 @@ when it is safe to do so.
 Useful repository-wide checks include:
 
 ```bash
-pnpm install --frozen-lockfile
+bun install --frozen-lockfile
 helm lint contrib/chart
 git diff --check
 ```

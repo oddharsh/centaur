@@ -1,0 +1,3 @@
+[install]
+# Each package sees only its declared dependencies, as under pnpm.
+linker = "isolated"
