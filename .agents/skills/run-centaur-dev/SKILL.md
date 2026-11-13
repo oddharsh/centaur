@@ -85,7 +85,7 @@ If port 5432 is occupied, map another host port and update `DATABASE_URL`.
 
 ## 3. Run api-rs On The Host
 
-Pick the host URL that Kind pods can reach. On Docker Desktop this is usually `host.docker.internal`; on OrbStack it may be `host.orb.internal`.
+Pick the host URL that Kind pods can reach. On Docker Desktop this is usually `host.docker.internal`; on OrbStack it may be `host.orb.internal`. A `just container-e2e-up` cluster has no host alias, so use the node's gateway: `container exec centaur-api-rs-e2e ip route | awk '/default/ {print $3}'` (`192.168.64.1` on 2026-11-13).
 
 ```bash
 export SANDBOX_HOST_API_URL=http://host.docker.internal:8080

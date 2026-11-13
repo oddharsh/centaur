@@ -12,6 +12,7 @@ agent_sandbox_rbac_url := "https://raw.githubusercontent.com/kubernetes-sigs/age
 agent_sandbox_controller_url := "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/" + agent_sandbox_ref + "/k8s/controller.yaml"
 kind_e2e_cluster := "centaur-api-rs-e2e"
 kind_e2e_context := "kind-" + kind_e2e_cluster
+container_e2e_context := kind_e2e_cluster
 kind_e2e_namespace := "centaur-sandbox-e2e"
 kind_e2e_tmp := "target/e2e"
 kind_e2e_agent_image := "centaur-agent:latest"
@@ -32,21 +33,23 @@ codegen-agent-sandbox-crd:
     kopium --filename "{{agent_sandbox_crd_tmp}}" --api-version v1alpha1 --schema disabled --derive PartialEq > "{{agent_sandbox_generated}}"
     cargo fmt --all
 
-kind-e2e-up:
+kind-e2e-up: && (_agent-sandbox-install kind_e2e_context)
     command -v kind >/dev/null || { echo "kind is required" >&2; exit 127; }
     command -v kubectl >/dev/null || { echo "kubectl is required" >&2; exit 127; }
     kind get clusters | grep -qx "{{kind_e2e_cluster}}" || kind create cluster --name "{{kind_e2e_cluster}}" --wait 120s
+
+_agent-sandbox-install context:
     mkdir -p "{{kind_e2e_tmp}}"
     curl -fsSL "{{agent_sandbox_crd_url}}" -o "{{kind_e2e_tmp}}/agents.x-k8s.io_sandboxes.yaml"
     curl -fsSL "{{agent_sandbox_rbac_url}}" -o "{{kind_e2e_tmp}}/rbac.generated.yaml"
     curl -fsSL "{{agent_sandbox_controller_url}}" \
       | sed 's#ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller.*#{{agent_sandbox_controller_image}}#' \
       > "{{kind_e2e_tmp}}/controller.yaml"
-    kubectl --context "{{kind_e2e_context}}" apply -f "{{kind_e2e_tmp}}/agents.x-k8s.io_sandboxes.yaml"
-    kubectl --context "{{kind_e2e_context}}" apply -f "{{kind_e2e_tmp}}/rbac.generated.yaml"
-    kubectl --context "{{kind_e2e_context}}" apply -f "{{kind_e2e_tmp}}/controller.yaml"
-    kubectl --context "{{kind_e2e_context}}" create namespace "{{kind_e2e_namespace}}" --dry-run=client -o yaml | kubectl --context "{{kind_e2e_context}}" apply -f -
-    kubectl --context "{{kind_e2e_context}}" -n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=120s
+    kubectl --context "{{context}}" apply -f "{{kind_e2e_tmp}}/agents.x-k8s.io_sandboxes.yaml"
+    kubectl --context "{{context}}" apply -f "{{kind_e2e_tmp}}/rbac.generated.yaml"
+    kubectl --context "{{context}}" apply -f "{{kind_e2e_tmp}}/controller.yaml"
+    kubectl --context "{{context}}" create namespace "{{kind_e2e_namespace}}" --dry-run=client -o yaml | kubectl --context "{{context}}" apply -f -
+    kubectl --context "{{context}}" -n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=120s
 
 kind-e2e-build-images:
     cd ../.. && docker build --target "{{kind_e2e_agent_target}}" -t "{{kind_e2e_agent_image}}" -f "{{kind_e2e_agent_dockerfile}}" .
@@ -97,3 +100,41 @@ e2e-kind: kind-e2e-up
 
 kind-e2e-down:
     kind delete cluster --name "{{kind_e2e_cluster}}"
+
+# kind-e2e-up on Apple's container CLI; its kube context has no "kind-" prefix
+container-e2e-up: && (_agent-sandbox-install container_e2e_context)
+    command -v container >/dev/null || { echo "container is required" >&2; exit 127; }
+    command -v kubectl >/dev/null || { echo "kubectl is required" >&2; exit 127; }
+    container cluster list | awk -v name="{{kind_e2e_cluster}}" '$1 == name && $NF == "running" { found = 1 } END { exit found ? 0 : 1 }' \
+      || container cluster create --name "{{kind_e2e_cluster}}"
+
+container-e2e-build-images:
+    cd ../.. && container build --target "{{kind_e2e_agent_target}}" -t "{{kind_e2e_agent_image}}" -f "{{kind_e2e_agent_dockerfile}}" .
+    cd ../.. && container build -t "{{kind_e2e_iron_proxy_image}}" -f services/iron-proxy/Dockerfile .
+
+container-e2e-load-images: container-e2e-up
+    #!/usr/bin/env bash
+    set -euo pipefail
+    node="{{kind_e2e_cluster}}"
+    force="${KIND_E2E_FORCE_IMAGE_LOAD:-0}"
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    for image in "{{kind_e2e_agent_image}}" "{{kind_e2e_iron_proxy_image}}"; do
+      if [[ ! "$force" =~ ^(1|true|yes)$ ]] && container exec "$node" crictl inspecti "docker.io/library/$image" >/dev/null 2>&1; then
+        echo "Node $node already has $image; skipping load"
+        continue
+      fi
+      echo "Loading $image into node $node"
+      container image save -o "$tmp/image.tar" "$image"
+      container exec -i "$node" ctr -n k8s.io images import --all-platforms - < "$tmp/image.tar"
+    done
+
+e2e-container: container-e2e-up
+    SANDBOX_E2E_IMPLS=all \
+    SANDBOX_E2E_K8S_CONTEXT="{{container_e2e_context}}" \
+    SANDBOX_E2E_K8S_NAMESPACE="{{kind_e2e_namespace}}" \
+    cargo test -p centaur-sandbox-e2e -- --ignored --nocapture
+
+container-e2e-down:
+    container cluster delete --name "{{kind_e2e_cluster}}"
