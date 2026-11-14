@@ -254,7 +254,13 @@ impl Engine {
             return Err(denied());
         }
         let im = boolean(channel, "is_im")?;
-        let mpim = boolean(channel, "is_mpim")?;
+        // Slack omits is_mpim from a DM's conversations.info (seen 2026-11-14),
+        // so a DM reads it as false; any other channel must still state it.
+        let mpim = if im && channel.get("is_mpim").is_none() {
+            false
+        } else {
+            boolean(channel, "is_mpim")?
+        };
         let kind = match (im, mpim) {
             (true, false) => ChannelKind::Im,
             (false, true) => ChannelKind::Mpim,
