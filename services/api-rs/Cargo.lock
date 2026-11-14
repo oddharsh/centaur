@@ -1042,6 +1042,7 @@ dependencies = [
  "centaur-sandbox-manager",
  "clap",
  "kube",
+ "rustls 0.23.44",
  "test-case",
  "tokio",
 ]
