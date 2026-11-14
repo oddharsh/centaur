@@ -577,6 +577,26 @@ async fn verifies_direct_message_counterpart_without_reading_dm_history() {
 }
 
 #[tokio::test]
+async fn searches_from_a_direct_message_whose_info_omits_is_mpim() {
+    // conversations.info for a DM, as Slack returned it on 2026-11-14: is_im
+    // and the counterpart, with no is_mpim, is_channel, is_group or is_shared.
+    let mut scenario = fixture();
+    scenario.channels.insert(
+        "DORIGIN".to_owned(),
+        json!({"id": "DORIGIN", "context_team_id": "T1", "is_im": true, "user": "U1"}),
+    );
+    let mock = mock(scenario).await;
+    let mut context = context();
+    context.channel_id = "DORIGIN".to_owned();
+    assert!(
+        mock.engine
+            .answer(&context, "synthetic-action-token", "query")
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
 async fn rejects_unknown_or_malformed_channel_sharing_status() {
     for channel_id in ["CORIGIN", "CPUBLIC"] {
         for field in [
