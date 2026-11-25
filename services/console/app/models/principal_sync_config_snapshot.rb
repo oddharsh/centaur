@@ -159,7 +159,7 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
   end
 
   def api_server_jwt_window_stale?(principal)
-    return false if ENV["CENTAUR_JWT_SIGNING_SECRET"].to_s.blank?
+    return false if ENV["CENTAUR_JWT_SIGNING_SECRET"].to_s.blank? && !PrincipalClaim::Jwt.configured?
 
     updated_at.to_i < ApiServer::Jwt.window_start_for(principal, Time.current.to_i)
   end
@@ -381,7 +381,7 @@ class PrincipalSyncConfigSnapshot < ApplicationRecord
 
   def self.generated_proxy_secrets_for(principal)
     secret = api_server_jwt_secret_for(principal)
-    secret ? [ secret ] : []
+    (secret ? [ secret ] : []) + PrincipalClaim::Jwt.proxy_secrets_for(principal)
   end
   private_class_method :generated_proxy_secrets_for
 

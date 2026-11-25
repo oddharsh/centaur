@@ -163,6 +163,17 @@ console:
   # Optional SSO admission policy. When non-empty, only identities whose email
   # domain matches this list can sign in through Google, Slack, or Okta.
   ssoEmailDomains: []
+  # Signed principal claims for downstream services that need to know which
+  # principal a sandbox request runs as. For each host listed, iron-proxy
+  # injects an ES256 JWT as X-Centaur-Principal (aud = that host, sub = the
+  # principal foreign id). The P-256 private key comes from the shared infra
+  # Secret key <secretManager.envPrefix>CENTAUR_PRINCIPAL_CLAIM_PRIVATE_KEY
+  # (optional; no key or no hosts means no header). Print the public JWK the
+  # verifier stores with:
+  #   kubectl exec deploy/<release>-centaur-console -- \
+  #     bin/rails runner "puts PrincipalClaim::Jwt.public_jwk.to_json"
+  principalClaim:
+    hosts: []
   image:
     repository: centaur-console
     tag: latest

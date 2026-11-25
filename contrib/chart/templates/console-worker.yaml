@@ -138,6 +138,16 @@ spec:
                 secretKeyRef:
                   name: {{ $secretEnv }}
                   key: {{ printf "%sCENTAUR_JWT_SIGNING_SECRET" $prefix }}
+            - name: CENTAUR_PRINCIPAL_CLAIM_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretEnv }}
+                  key: {{ printf "%sCENTAUR_PRINCIPAL_CLAIM_PRIVATE_KEY" $prefix }}
+                  optional: true
+{{- with $console.principalClaim.hosts }}
+            - name: CENTAUR_PRINCIPAL_CLAIM_HOSTS
+              value: {{ join "," . | quote }}
+{{- end }}
 {{- if $console.publicUrl }}
             - name: CENTAUR_CONSOLE_PUBLIC_URL
               value: {{ $console.publicUrl | quote }}
